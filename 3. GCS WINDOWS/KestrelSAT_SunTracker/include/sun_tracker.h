@@ -31,6 +31,7 @@ struct TrackerGains {
   float Kp;             // N*m per rad of pointing error
   float Kd;             // N*m per rad/s of body rate
   float deadband_deg;   // inside this error, Kp term is turned off
+  float max_rate_dps;   // slew rate cap (deg/s): the controller never asks to turn faster than this
 };
 
 struct WheelLimits {
@@ -58,3 +59,8 @@ float pointing_error_deg(float sun_direction_deg, float array_axis_deg);
 float tracker_step(float error_deg, float body_rate_dps, float dt_s,
                    const TrackerGains &gains, const WheelLimits &limits,
                    float I_wheel, float &w_cmd_rpm, bool &saturated);
+
+// Wheel speed to send to the motor so the (laggy) wheel follows w_cmd_rpm.
+//   max_rpm : wheel speed at 100% PWM (RPM_PER_PWM)
+float motor_lag_comp(float w_cmd_rpm, float w_prev_cmd_rpm, float dt_s,
+                     float motor_tau_s, float max_rpm);

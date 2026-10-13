@@ -27,8 +27,10 @@ def main():
     if here not in sys.path:
         sys.path.insert(0, here)
 
-    from kestrelsat.app import main as gcs_main
-    gcs_main()
+    from kestrelsat import app
+    import sun_map
+    sun_map.install(app)  # Lab 8 add-on: "Lab 8 > Sun Map..." menu
+    app.main()
 
 
 if __name__ == "__main__":

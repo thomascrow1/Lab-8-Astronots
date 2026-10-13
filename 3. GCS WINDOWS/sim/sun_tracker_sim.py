@@ -31,13 +31,15 @@ RPM_PER_PWM = 1000.0 * MOTOR_VOLTAGE / 12.0
 SOLAR_ARRAY_AXIS_DEG = 180.0
 I_BODY_Z = 0.014
 I_WHEEL = 0.0035
-DEFAULT_KP = 0.0035
-DEFAULT_KD = 0.0098
-DEFAULT_BIAS_PWM = 0.5
+DEFAULT_KP = 0.126
+DEFAULT_KD = 0.1092
+DEFAULT_MAX_RATE_DPS = 90.0
+DEFAULT_BIAS_PWM = 0.0
 POINTING_DEADBAND_DEG = 3.0
-WHEEL_MIN_RPM = 40.0
+WHEEL_MIN_RPM = -400.0
 WHEEL_MAX_RPM = 400.0
-WHEEL_MAX_ACCEL_RPM_S = 50.0
+WHEEL_MAX_ACCEL_RPM_S = 400.0
+MOTOR_TAU_S = 1.1
 SUN_LOST_THRESHOLD = 0.15
 SUN_LOST_TIME_MS = 500
 TRACK_SPINUP_MS = 3000
@@ -59,6 +61,7 @@ def wrap180(angle_deg):
 
 def compute_sun(norm):
     """norm: calibrated brightness [+X, +Y, -X, -Y] (calibration already applied)."""
+    norm = [min(n, 1.2) for n in norm]  # same cap as sun_tracker.cpp
     magnitude = sum(norm)
     sun_x = norm[0] - norm[2]
     sun_y = norm[1] - norm[3]
@@ -68,13 +71,18 @@ def compute_sun(norm):
     return direction, magnitude
 
 
-def tracker_step(error_deg, body_rate_dps, dt_s, kp, kd, deadband_deg, w_cmd_rpm):
+def tracker_step(error_deg, body_rate_dps, dt_s, kp, kd, deadband_deg, w_cmd_rpm,
+                 max_rate_dps=DEFAULT_MAX_RATE_DPS):
     error_rad = math.radians(error_deg)
     rate_rad_s = math.radians(body_rate_dps)
-    p_term = kp * error_rad
     if abs(error_deg) < deadband_deg:
-        p_term = 0.0
-    tau = p_term - kd * rate_rad_s
+        error_rad = 0.0
+    if kd > 0:
+        max_rate = math.radians(max_rate_dps)
+        rate_des = max(-max_rate, min(max_rate, (kp / kd) * error_rad))
+        tau = kd * (rate_des - rate_rad_s)
+    else:
+        tau = kp * error_rad
 
     accel_rpm_s = (-tau / I_WHEEL) * RPM_PER_RAD_S
     accel_rpm_s = max(-WHEEL_MAX_ACCEL_RPM_S, min(WHEEL_MAX_ACCEL_RPM_S, accel_rpm_s))
@@ -86,6 +94,13 @@ def tracker_step(error_deg, body_rate_dps, dt_s, kp, kd, deadband_deg, w_cmd_rpm
     if w_cmd_rpm < WHEEL_MIN_RPM:
         w_cmd_rpm, saturated = WHEEL_MIN_RPM, True
     return tau, w_cmd_rpm, saturated
+
+
+def motor_lag_comp(w_cmd_rpm, w_prev_cmd_rpm, dt_s, motor_tau_s, max_rpm):
+    w = w_cmd_rpm
+    if dt_s > 0:
+        w += motor_tau_s * (w_cmd_rpm - w_prev_cmd_rpm) / dt_s
+    return max(-max_rpm, min(max_rpm, w))
 
 
 # ---------------------------------------------------------------- plant models
@@ -107,7 +122,7 @@ def sun_sensor(sun_body_deg, rng, noise, intensity=1.0):
 
 def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
              sun_start_deg=90.0, sun_rate_dps=0.0, duration_s=60.0,
-             motor_tau_s=0.4, string_k=0.0, gyro_noise_dps=0.1, sun_noise=0.01,
+             motor_tau_s=MOTOR_TAU_S, string_k=0.0, gyro_noise_dps=0.1, sun_noise=0.01,
              sun_off_at_s=None, seed=1):
     """
     sun_start_deg : sun azimuth in the body frame at release (0 = +X; array is at 180)
@@ -129,6 +144,7 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     sun_lost_since = None
     bias_rpm = bias_pwm * RPM_PER_PWM
     released = False
+    w_prev_cmd = 0.0
 
     log = {k: [] for k in ["t", "mode", "sun_dir", "err", "rate", "w_cmd", "w_meas", "tau", "sat"]}
     t = 0.0
@@ -171,10 +187,14 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
         if mode == "STOPPED":
             break
 
+        # ---- motor lag compensation (same as sun_track())
+        w_motor = motor_lag_comp(w_cmd, w_prev_cmd, DT_CONTROL, MOTOR_TAU_S, RPM_PER_PWM)
+        w_prev_cmd = w_cmd
+
         # ---- plant (1 ms steps until next control update)
         released = t_ms >= TRACK_RELEASE_MS
         for _ in range(n_sub):
-            w_dot = (w_cmd - w_wheel) / motor_tau_s          # RPM/s
+            w_dot = (w_motor - w_wheel) / motor_tau_s          # RPM/s
             w_wheel += w_dot * dt
             torque_on_body = -I_WHEEL * (w_dot / RPM_PER_RAD_S) - string_k * math.radians(theta)
             if released:
@@ -243,7 +263,7 @@ def main():
     parser.add_argument("--kp", type=float, default=DEFAULT_KP)
     parser.add_argument("--kd", type=float, default=DEFAULT_KD)
     parser.add_argument("--bias", type=float, default=DEFAULT_BIAS_PWM)
-    parser.add_argument("--motor-tau", type=float, default=0.4, help="wheel time constant (s)")
+    parser.add_argument("--motor-tau", type=float, default=MOTOR_TAU_S, help="wheel time constant (s)")
     parser.add_argument("--scenario", choices=list(SCENARIOS), help="run one scenario (default: all)")
     parser.add_argument("--show", action="store_true", help="open plot windows")
     args = parser.parse_args()

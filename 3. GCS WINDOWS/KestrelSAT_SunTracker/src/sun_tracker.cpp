@@ -35,6 +35,7 @@ SunReading compute_sun(const float raw[4], const SunCalibration &cal) {
     if (span < 1.0f) span = 1.0f;  // avoid divide by zero on a bad calibration
     float n = (raw[i] - cal.dark[i]) / span;
     if (n < 0.0f) n = 0.0f;        // darker than calibration = no light
+    if (n > 1.2f) n = 1.2f;        // brighter than calibration: cap it so one badly calibrated channel can't dominate
     r.norm[i] = n;
     r.magnitude += n;
   }
@@ -64,7 +65,7 @@ float pointing_error_deg(float sun_direction_deg, float array_axis_deg) {
  * 2. Reaction torque: the body feels -I_wheel * wheel_accel, so
  *    wheel_accel = -tau / I_wheel.
  * 3. Limit wheel acceleration, integrate to a wheel speed command, and keep the
- *    speed between min_rpm and max_rpm (the wheel never crosses 0 RPM).
+ *    speed between min_rpm and max_rpm (the wheel may spin either way).
  */
 float tracker_step(float error_deg, float body_rate_dps, float dt_s,
                    const TrackerGains &gains, const WheelLimits &limits,
@@ -72,9 +73,20 @@ float tracker_step(float error_deg, float body_rate_dps, float dt_s,
   float error_rad = error_deg / DEG_PER_RAD;
   float rate_rad_s = body_rate_dps / DEG_PER_RAD;
 
-  float p_term = gains.Kp * error_rad;
-  if (fabsf(error_deg) < gains.deadband_deg) p_term = 0.0f;  // close enough: just damp
-  float tau = p_term - gains.Kd * rate_rad_s;
+  if (fabsf(error_deg) < gains.deadband_deg) error_rad = 0.0f;  // close enough: just damp
+
+  // Same as PD (tau = Kp*error - Kd*rate), written as "turn at a desired rate":
+  // desired rate = (Kp/Kd)*error, capped at max_rate so big slews are smooth and steady.
+  float tau;
+  if (gains.Kd > 0.0f) {
+    float rate_des = (gains.Kp / gains.Kd) * error_rad;
+    float max_rate = gains.max_rate_dps / DEG_PER_RAD;
+    if (rate_des >  max_rate) rate_des =  max_rate;
+    if (rate_des < -max_rate) rate_des = -max_rate;
+    tau = gains.Kd * (rate_des - rate_rad_s);
+  } else {
+    tau = gains.Kp * error_rad;
+  }
 
   float accel_rpm_s = (-tau / I_wheel) * RPM_PER_RAD_S;
   if (accel_rpm_s >  limits.max_accel_rpm_s) accel_rpm_s =  limits.max_accel_rpm_s;
@@ -87,4 +99,21 @@ float tracker_step(float error_deg, float body_rate_dps, float dt_s,
   if (w_cmd_rpm < limits.min_rpm) { w_cmd_rpm = limits.min_rpm; saturated = true; }
 
   return tau;
+}
+
+/**
+ * @brief Motor lag compensation.
+ *
+ * The wheel only reaches a new speed about MOTOR_TAU_S after it is commanded, so the
+ * controller always acts on a wheel that is behind. Commanding ahead by
+ * motor_tau * (how fast the command is changing) makes the real wheel follow the
+ * command almost without lag (the inverse of a first-order lag).
+ */
+float motor_lag_comp(float w_cmd_rpm, float w_prev_cmd_rpm, float dt_s,
+                     float motor_tau_s, float max_rpm) {
+  float w = w_cmd_rpm;
+  if (dt_s > 0.0f) w += motor_tau_s * (w_cmd_rpm - w_prev_cmd_rpm) / dt_s;
+  if (w > max_rpm)  w = max_rpm;
+  if (w < -max_rpm) w = -max_rpm;
+  return w;
 }

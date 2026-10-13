@@ -37,19 +37,23 @@
 #define RPM_PER_PWM             (1000.0 * MOTOR_VOLTAGE / 12.0) // wheel RPM at 100% PWM (same as Lab 7 w_RW_cmd)
 
 // Default controller gains (tunable at runtime with command 14):
-//   Kp = I_BODY_Z * wn^2, Kd = 2 * zeta * wn * I_BODY_Z  with wn = 0.5 rad/s, zeta = 0.7
-#define DEFAULT_KP              0.0035  // N*m per rad of pointing error
-#define DEFAULT_KD              0.0098  // N*m per rad/s of body rate
-#define DEFAULT_BIAS_PWM        0.5     // wheel bias so it never crosses zero speed (Lab 7 Test B used 0.6)
+//   Kp = I_BODY_Z * wn^2, Kd = 2 * zeta * wn * I_BODY_Z  with wn = 3.0 rad/s, zeta = 1.3 (OVERDAMPED: no overshoot)
+//   Sim (measured 1.1 s motor lag): settles to 5 deg in 30 deg ~1.4 s, 90 deg ~2.2 s, 170 deg ~3.2 s, 0 deg overshoot
+#define DEFAULT_KP              0.126   // N*m per rad of pointing error
+#define DEFAULT_KD              0.1092  // N*m per rad/s of body rate
+#define DEFAULT_MAX_RATE_DPS    90.0    // slew rate cap: big turns run at <= this speed, then ease in
+#define DEFAULT_BIAS_PWM        0.0     // wheel starts at 0 RPM: full -400..+400 RPM range available both ways
 #define POINTING_DEADBAND_DEG   3.0     // inside this error, only rate damping is applied
 
 // Wheel limits:
-#define WHEEL_MIN_RPM           40.0    // stay above this to avoid motor stiction near 0 RPM
+#define WHEEL_MIN_RPM           -400.0  // wheel may spin both ways (crosses 0 RPM) for twice the range
 #define WHEEL_MAX_RPM           400.0   // ~100% PWM on 5V supply
-#define WHEEL_MAX_ACCEL_RPM_S   50.0    // Lab 7 prelab wheel angular acceleration limit
+#define WHEEL_STALL_RPM         50.0    // measured 13 Oct: wheel stalls below ~45 RPM; smaller commands jump to +/- this
+#define WHEEL_MAX_ACCEL_RPM_S   400.0   // was 50 (Lab 7 prelab limit); raised for fast slews
+#define MOTOR_TAU_S             1.1     // measured 13 Oct (SunTrack_data026 spin-up): wheel speed time constant
 
 // Sign conventions (verify with command 12, can be changed at runtime with command 14):
-#define DEFAULT_WHEEL_PWM_SIGN  -1      // Lab 7 code: w_RW_cmd = -speed_pwm * RPM_PER_PWM
+#define DEFAULT_WHEEL_PWM_SIGN  1       // measured 13 Oct (SunTrack_data020): -1 drove KestrelSAT away from the light
 #define DEFAULT_GYRO_SIGN       1       // +1 if gyrZ() is positive for +Z (counter-clockwise from above) rotation
 
 // Sun detection:

@@ -131,8 +131,8 @@ float mag_X = 0.0;
 float mag_Y = 0.0;
 
 // Lab 8 Sun Tracker:
-SunCalibration sun_cal = {{0.0, 0.0, 0.0, 0.0}, {4095.0, 4095.0, 4095.0, 4095.0}}; // replace with command 10 results
-TrackerGains tracker_gains = {DEFAULT_KP, DEFAULT_KD, POINTING_DEADBAND_DEG};
+SunCalibration sun_cal = {{74.5, 415.4, 641.5, 272.7}, {3249.1, 4095.0, 4036.5, 4094.8}}; // measured 13 Oct after fixing +/-Y sensors (command 10)
+TrackerGains tracker_gains = {DEFAULT_KP, DEFAULT_KD, POINTING_DEADBAND_DEG, DEFAULT_MAX_RATE_DPS};
 WheelLimits wheel_limits = {WHEEL_MIN_RPM, WHEEL_MAX_RPM, WHEEL_MAX_ACCEL_RPM_S};
 float array_axis_deg = SOLAR_ARRAY_AXIS_DEG;
 float bias_pwm = DEFAULT_BIAS_PWM;
@@ -1365,6 +1365,8 @@ float measure_wheel_rpm() {
  *        Open loop: PWM is proportional to speed, like Lab 7 (RPM_PER_PWM).
  */
 void set_wheel_rpm(float w_rpm) {
+  // The wheel stalls below ~WHEEL_STALL_RPM, so jump small commands past the stall zone.
+  if (fabs(w_rpm) > 1.0 && fabs(w_rpm) < WHEEL_STALL_RPM) w_rpm = (w_rpm > 0) ? WHEEL_STALL_RPM : -WHEEL_STALL_RPM;
   float pwm = wheel_pwm_sign * w_rpm / RPM_PER_PWM;
   if (pwm > 1.0) pwm = 1.0;
   if (pwm < -1.0) pwm = -1.0;
@@ -1420,6 +1422,7 @@ void sun_calibrate() {
   const char *names[4] = {"+X", "+Y", "-X", "-Y"};
   SunCalibration new_cal;
   float raw[4];
+  bool cal_ok = true;
 
   print_both("[INFO] SUN SENSOR CALIBRATION. Send 'X' at any prompt to cancel.");
   print_both("[INFO] Step 1: turn OFF the light source (room lights as they will be during the test), then send any key.");
@@ -1443,9 +1446,18 @@ void sun_calibrate() {
       delay(5);
     }
     new_cal.bright[i] = s / n_samples;
-    if (new_cal.bright[i] < new_cal.dark[i] + 50) {
-      print_both(String("[CAUTION] ") + names[i] + " barely changed with light on it. Check wiring/aim and recalibrate.");
+    if (new_cal.bright[i] < new_cal.dark[i] + 300) {
+      print_both(String("[CAUTION] ") + names[i] + " barely changed with light on it (dark " + String(new_cal.dark[i], 0) +
+                 ", bright " + String(new_cal.bright[i], 0) + "). Aim the light straight at it, closer.");
+      cal_ok = false;
     }
+  }
+
+  // A tiny dark-to-bright range blows that channel up to huge values and wrecks the sun direction,
+  // so keep the old calibration instead of applying a bad one.
+  if (!cal_ok) {
+    print_both("[CAUTION] Calibration NOT applied (previous calibration kept). Run 10 again.");
+    return;
   }
 
   sun_cal = new_cal;
@@ -1545,6 +1557,12 @@ void sun_sign_check() {
              " deg, raw gyro integral: " + String(gyro_angle, 1) +
              " deg, encoder counts for +PWM: " + String((long)dcount));
 
+  // If the wheel never spun, any body motion came from the string or a bump, not the wheel.
+  if (llabs(dcount) < 20) {
+    print_both("[CAUTION] Wheel did not spin (encoder counts ~0). Check motor wiring/power. Signs not changed.");
+    return;
+  }
+
   float body_turn;  // best estimate of the body turn, +Z positive
   if (fabs(body_turn_from_sun) >= 3.0) {
     gyro_sign = (gyro_angle * body_turn_from_sun > 0) ? 1 : -1;
@@ -1609,6 +1627,7 @@ void sun_track() {
 
   const float bias_rpm = bias_pwm * RPM_PER_PWM;
   float w_cmd_rpm = 0.0;
+  float w_prev_cmd_rpm = 0.0;   // for motor lag compensation
   float tau = 0.0;
   bool saturated = false;
   uint32_t saturated_since = 0;
@@ -1679,7 +1698,8 @@ void sun_track() {
       if (fabs(err) <= 10.0) neopixelWrite(RGB_BUILTIN, 0, 255, 0);   // green: on target
       else                   neopixelWrite(RGB_BUILTIN, 255, 165, 0); // orange: slewing
     }
-    set_wheel_rpm(w_cmd_rpm);
+    set_wheel_rpm(motor_lag_comp(w_cmd_rpm, w_prev_cmd_rpm, dt_s, MOTOR_TAU_S, RPM_PER_PWM));
+    w_prev_cmd_rpm = w_cmd_rpm;
 
     // Warn (once per 5 s) if the wheel stays at a speed limit for more than 2 s:
     if (saturated) {
@@ -1713,7 +1733,11 @@ void sun_track() {
     // Telemetry (Name:value for GCS plotter): every point on USB, 2 Hz on XBee
     String s = "t:" + String(t) + ",err:" + String(err, 1) + ",gZ:" + String(rate, 2) +
                ",wCmd:" + String(w_cmd_rpm, 0) + ",wMeas:" + String(w_meas, 0) +
-               ",sDir:" + String(sun.direction_deg, 1);
+               ",sDir:" + String(sun.direction_deg, 1) +
+               // same sun sensor fields as command 11, so the GCS Sun Map works during tracking
+               ",mag:" + String(sun.magnitude, 2) +
+               ",n+X:" + String(sun.norm[SUN_PX], 2) + ",n+Y:" + String(sun.norm[SUN_PY], 2) +
+               ",n-X:" + String(sun.norm[SUN_MX], 2) + ",n-Y:" + String(sun.norm[SUN_MY], 2);
     Serial.println(s);
     if (test_point_count % 10 == 0) {
       dataFile.flush(); // save file every 10 test points
@@ -1738,7 +1762,8 @@ void sun_track() {
  */
 void sun_print_params() {
   print_both(String("kp=") + String(tracker_gains.Kp, 5) + " kd=" + String(tracker_gains.Kd, 5) +
-             " db=" + String(tracker_gains.deadband_deg, 1) + " bias=" + String(bias_pwm, 2) +
+             " db=" + String(tracker_gains.deadband_deg, 1) + " rate=" + String(tracker_gains.max_rate_dps, 0) +
+             " bias=" + String(bias_pwm, 2) +
              " axis=" + String(array_axis_deg, 1) + " wsign=" + wheel_pwm_sign + " gsign=" + gyro_sign);
   String cal = "cal dark/bright (+X,+Y,-X,-Y): ";
   for (int i = 0; i < 4; i++) cal += String(sun_cal.dark[i], 0) + "/" + String(sun_cal.bright[i], 0) + " ";
@@ -1752,7 +1777,7 @@ void sun_print_params() {
  */
 void sun_set_params() {
   sun_print_params();
-  print_both("[INFO] Send '<name> <value>' (names: kp kd db bias axis wsign gsign). Send 'done' to finish.");
+  print_both("[INFO] Send '<name> <value>' (names: kp kd db rate bias axis wsign gsign). Send 'done' to finish.");
   while (true) {
     String line = wait_for_line();
     line.toLowerCase();
@@ -1766,7 +1791,8 @@ void sun_set_params() {
     if      (name == "kp")    tracker_gains.Kp = value;
     else if (name == "kd")    tracker_gains.Kd = value;
     else if (name == "db")    tracker_gains.deadband_deg = value;
-    else if (name == "bias")  bias_pwm = constrain(value, 0.1, 0.9);
+    else if (name == "rate")  tracker_gains.max_rate_dps = value;
+    else if (name == "bias")  bias_pwm = constrain(value, -0.9, 0.9);
     else if (name == "axis")  array_axis_deg = value;
     else if (name == "wsign") wheel_pwm_sign = (value < 0) ? -1 : 1;
     else if (name == "gsign") gyro_sign = (value < 0) ? -1 : 1;
