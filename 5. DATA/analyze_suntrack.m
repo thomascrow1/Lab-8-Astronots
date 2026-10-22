@@ -18,7 +18,7 @@ dataDir      = fileparts(mfilename('fullpath'));
 filePattern  = 'SunTrack_data*.csv';
 % Which runs to analyze, by data number, e.g. [51] or [27 44:47].
 % Leave empty ([]) to analyze every SunTrack_data*.csv file.
-runNumbers   = 36:52;
+runNumbers   = 52:52;
 errThreshDeg = 10;      % "on target" band for pointing-error statistics [deg]
 modeOrder    = {'SPINUP','HOLD','TRACK','NOSUN'};
 modeColors   = [0.85 0.33 0.10; 0.93 0.69 0.13; 0.47 0.67 0.19; 0.30 0.30 0.30];
