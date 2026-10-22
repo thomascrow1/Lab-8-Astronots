@@ -1,8 +1,9 @@
 %% analyze_suntrack.m
 % Astro 331 Lab 8 - KestrelSAT sun-tracking (reaction wheel) data analysis
 %
-% Reads every SunTrack_data*.csv file in this folder and, for each one,
-% writes PDF plots to ./plots/<file name>/ plus a combined multi-page PDF
+% Reads every SunTrack_data*.csv file in this folder and its subfolders
+% (e.g. File archive/Lab 8 Data) and, for each one, writes PDF plots to
+% ./plots/<file name>/ plus a combined multi-page PDF
 % (<file name>_all.pdf) and prints summary statistics to the command window.
 %
 % CSV columns (from KestrelSAT log):
@@ -16,8 +17,8 @@ clear; clc; close all;
 dataDir      = fileparts(mfilename('fullpath'));
 filePattern  = 'SunTrack_data*.csv';
 errThreshDeg = 10;      % "on target" band for pointing-error statistics [deg]
-modeOrder    = {'SPINUP','HOLD','TRACK'};
-modeColors   = [0.85 0.33 0.10; 0.93 0.69 0.13; 0.47 0.67 0.19];
+modeOrder    = {'SPINUP','HOLD','TRACK','NOSUN'};
+modeColors   = [0.85 0.33 0.10; 0.93 0.69 0.13; 0.47 0.67 0.19; 0.30 0.30 0.30];
 arrayAxisDeg = 180;     % solar array normal in body frame (-X face), SOLAR_ARRAY_AXIS_DEG
 % Sun sensor calibration used by the flight code (sun_cal in main.cpp), order +X +Y -X -Y.
 % Update this if you re-run command 10 so the diagnostic matches the firmware.
@@ -25,22 +26,42 @@ sunCal.dark   = [74.5  415.4  641.5  272.7];
 sunCal.bright = [3249.1 4095.0 4036.5 4094.8];
 adcMax       = 4095;    % 12-bit ADC full scale
 
-files = dir(fullfile(dataDir, filePattern));
+plotRoot     = fullfile(dataDir, 'plots');
+
+files = dir(fullfile(dataDir, '**', filePattern));
 if isempty(files)
     error('No files matching %s found in %s', filePattern, dataDir);
 end
+% Same run can exist in more than one folder (e.g. a copy in the archive);
+% analyze each file name once
+[~, keep] = unique({files.name}, 'stable');
+files = files(keep);
+[~, order] = sort({files.name});
+files = files(order);
 
+failed = {};
 for k = 1:numel(files)
-    analyzeFile(fullfile(files(k).folder, files(k).name), ...
-        errThreshDeg, modeOrder, modeColors, arrayAxisDeg, sunCal, adcMax);
+    csvPath = fullfile(files(k).folder, files(k).name);
+    try
+        analyzeFile(csvPath, plotRoot, errThreshDeg, modeOrder, modeColors, ...
+            arrayAxisDeg, sunCal, adcMax);
+    catch ME
+        fprintf(2, 'Skipped %s: %s\n', files(k).name, ME.message);
+        failed{end + 1} = files(k).name; %#ok<AGROW>
+        close all;
+    end
+end
+fprintf('\nAnalyzed %d of %d files.\n', numel(files) - numel(failed), numel(files));
+if ~isempty(failed)
+    fprintf('Skipped: %s\n', strjoin(failed, ', '));
 end
 
 %% ------------------------------------------------------------------------
-function analyzeFile(csvPath, errThreshDeg, modeOrder, modeColors, ...
+function analyzeFile(csvPath, plotRoot, errThreshDeg, modeOrder, modeColors, ...
     arrayAxisDeg, sunCal, adcMax)
 
 [~, name] = fileparts(csvPath);
-outDir = fullfile(fileparts(csvPath), 'plots', name);
+outDir = fullfile(plotRoot, name);
 if ~exist(outDir, 'dir'), mkdir(outDir); end
 combinedPdf = fullfile(outDir, [name '_all.pdf']);
 if exist(combinedPdf, 'file'), delete(combinedPdf); end
@@ -50,6 +71,9 @@ fprintf('\n===== %s =====\n', name);
 %% Load data
 opts = detectImportOptions(csvPath, 'VariableNamingRule', 'preserve');
 T = readtable(csvPath, opts);
+if height(T) < 2
+    error('no data rows');
+end
 
 t        = (T.("mcu time(ms)") - T.("mcu time(ms)")(1)) / 1000;   % [s]
 mode     = string(T.mode);
@@ -76,17 +100,17 @@ f = newFig('Pointing');
 tiledlayout(f, 2, 1, 'TileSpacing', 'compact');
 ax = nexttile; hold on;
 shadeModes(ax, segs, modeOrder, modeColors);
-plot(t, breakWraps(sunDir), 'b-', 'LineWidth', 1.2);
+plotWrap(t, sunDir, 'b-', 'LineWidth', 1.2);
 ylabel('Sun direction (deg)'); ylim([0 360]); yticks(0:90:360);
 title('Sun Direction in Body Frame'); grid on;
 ax = nexttile; hold on;
 shadeModes(ax, segs, modeOrder, modeColors);
-plot(t, breakWraps(err), 'r-', 'LineWidth', 1.2);
-yline([-errThreshDeg errThreshDeg], 'k--', 'HandleVisibility', 'off');
-yline(0, 'k-', 'HandleVisibility', 'off');
+% Error shown 0-360: 0/360 = on target, 180 = sun directly behind the array
+plotWrap(t, mod(err, 360), 'r-', 'LineWidth', 1.2);
+yline([errThreshDeg 360 - errThreshDeg], 'k--', 'HandleVisibility', 'off');
 ylabel('Pointing error (deg)'); xlabel('Time (s)');
-ylim([-180 180]); yticks(-180:45:180);
-title('Pointing Error'); grid on;
+ylim([0 360]); yticks(0:45:360);
+title('Pointing Error (0/360 = on target)'); grid on;
 modeLegend(ax, segs, modeOrder, modeColors);
 saveFig(f, outDir, name, 'pointing', combinedPdf);
 
@@ -175,16 +199,15 @@ saveFig(f, outDir, name, 'headings', combinedPdf);
 % -X face direction = psi + array axis; sun direction = psi + measured body-frame sun angle.
 % A fixed light source should give a flat sun line; tracking works when the two lines overlap.
 psi      = cumtrapz(t, rate);
-% Each line is wrapped around its own median so neither is chopped at 0/360.
-faceAz   = wrapNear(psi + arrayAxisDeg);
-sunAz    = wrapNear(psi + sunDir);
+faceAz   = mod(psi + arrayAxisDeg, 360);
+sunAz    = mod(psi + sunDir, 360);
 f = newFig('Array vs sun');
 tiledlayout(f, 2, 1, 'TileSpacing', 'compact');
 ax = nexttile; hold on;
 shadeModes(ax, segs, modeOrder, modeColors);
-plot(t, breakWraps(faceAz), 'k-', 'LineWidth', 1.8, 'DisplayName', '-X face (solar array)');
-plot(t, breakWraps(sunAz), 'Color', [0.9 0.6 0], 'LineWidth', 1.2, 'DisplayName', 'Sun (from sun sensor)');
-ylabel('Room-frame angle (deg)'); yticks(-360:45:720);
+plotWrap(t, faceAz, 'k-', 'LineWidth', 1.8, 'DisplayName', '-X face (solar array)');
+plotWrap(t, sunAz, 'Color', [0.9 0.6 0], 'LineWidth', 1.2, 'DisplayName', 'Sun (from sun sensor)');
+ylabel('Room-frame angle (deg)'); ylim([0 360]); yticks(0:45:360);
 title('Solar Array Direction vs. Measured Sun Direction (0 = body +X at start)'); grid on;
 legend(flipud(findobj(ax, 'Type', 'line')), 'Location', 'best');
 ax = nexttile; hold on;
@@ -230,13 +253,12 @@ title('Sun Vector Components (direction = atan2(sun\_Y, sun\_X); sun\_X < 0 need
 legend(flipud(findobj(ax, 'Type', 'line')), 'Location', 'eastoutside');
 ax = nexttile; hold on;
 shadeModes(ax, segs, modeOrder, modeColors);
-sunDir180 = mod(sunDir + 180, 360) - 180;
-plot(t, breakWraps(sunDir180), 'b-', 'LineWidth', 1.0, 'DisplayName', 'Sun direction (body)');
-plot(t, breakWraps(err), 'r-', 'LineWidth', 1.0, 'DisplayName', 'Pointing error');
-plot(t(flips), err(flips), 'mv', 'MarkerFaceColor', 'm', 'MarkerSize', 5, ...
-    'DisplayName', sprintf('Error flips +/-180 (%d)', nnz(flips)));
-yline(wrapNear(arrayAxisDeg, 0) * [1 -1], 'k--', 'array axis', 'HandleVisibility', 'off');
-xlabel('Time (s)'); ylabel('Angle (deg)'); ylim([-180 180]); yticks(-180:45:180);
+plotWrap(t, sunDir, 'b-', 'LineWidth', 1.0, 'DisplayName', 'Sun direction (body)');
+plotWrap(t, mod(err, 360), 'r-', 'LineWidth', 1.0, 'DisplayName', 'Pointing error');
+plot(t(flips), mod(err(flips), 360), 'mv', 'MarkerFaceColor', 'm', 'MarkerSize', 5, ...
+    'DisplayName', sprintf('Error crosses 180, turn reverses (%d)', nnz(flips)));
+yline(arrayAxisDeg, 'k--', 'array axis', 'HandleVisibility', 'off');
+xlabel('Time (s)'); ylabel('Angle (deg)'); ylim([0 360]); yticks(0:45:360);
 title('Sun Direction and Pointing Error, with Turn-Direction Flips Marked'); grid on;
 legend(flipud(findobj(ax, 'Type', 'line')), 'Location', 'eastoutside');
 saveFig(f, outDir, name, 'sun_sensor_diagnostic', combinedPdf);
@@ -338,17 +360,24 @@ set(ax, 'Layer', 'top');
 xlim(ax, [segs(1).t0 segs(end).t1]);
 end
 
-function a = wrapNear(a, center)
-% Wrap angles (deg) into [center-180, center+180); center defaults to the circular median
-if nargin < 2
-    center = atan2d(median(sind(a)), median(cosd(a)));
+function h = plotWrap(t, y, varargin)
+% Plot an angle in [0, 360) deg. At each 0/360 wrap the line runs to the
+% edge of the axis and continues from the opposite edge, instead of drawing
+% a vertical line across the plot or stopping short of the edge.
+t = t(:); y = y(:);
+w = find(abs(diff(y)) > 180);
+tt = t; yy = y;
+for i = flipud(w)'
+    if y(i + 1) < y(i)                    % crossed 360 going up
+        yA = 360; yB = 0;   d = y(i + 1) + 360 - y(i);
+    else                                  % crossed 0 going down
+        yA = 0;   yB = 360; d = y(i + 1) - 360 - y(i);
+    end
+    tc = t(i) + (t(i + 1) - t(i)) * (yA - y(i)) / d;
+    tt = [tt(1:i); tc; NaN; tc; tt(i + 1:end)];
+    yy = [yy(1:i); yA; NaN; yB; yy(i + 1:end)];
 end
-a = mod(a - center + 180, 360) - 180 + center;
-end
-
-function y = breakWraps(y)
-% Insert NaN at +/-180 deg wrap jumps so plots don't draw vertical lines
-y(find(abs(diff(y)) > 180) + 1) = NaN;
+h = plot(tt, yy, varargin{:});
 end
 
 function modeLegend(ax, segs, modeOrder, modeColors)
@@ -357,6 +386,7 @@ present = unique([segs.mode], 'stable');
 h = gobjects(numel(present), 1);
 for i = 1:numel(present)
     c = modeColors(strcmp(modeOrder, present(i)), :);
+    if isempty(c), c = [0.7 0.7 0.7]; end
     h(i) = patch(ax, NaN, NaN, c, 'FaceAlpha', 0.3, 'EdgeColor', 'none', ...
         'DisplayName', char(present(i)));
 end
