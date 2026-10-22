@@ -16,6 +16,9 @@ clear; clc; close all;
 %% User settings
 dataDir      = fileparts(mfilename('fullpath'));
 filePattern  = 'SunTrack_data*.csv';
+% Which runs to analyze, by data number, e.g. [51] or [27 44:47].
+% Leave empty ([]) to analyze every SunTrack_data*.csv file.
+runNumbers   = 36:52;
 errThreshDeg = 10;      % "on target" band for pointing-error statistics [deg]
 modeOrder    = {'SPINUP','HOLD','TRACK','NOSUN'};
 modeColors   = [0.85 0.33 0.10; 0.93 0.69 0.13; 0.47 0.67 0.19; 0.30 0.30 0.30];
@@ -38,6 +41,18 @@ end
 files = files(keep);
 [~, order] = sort({files.name});
 files = files(order);
+
+if ~isempty(runNumbers)
+    nums = str2double(regexp({files.name}, '\d+(?=\.csv$)', 'match', 'once'));
+    missing = setdiff(runNumbers, nums);
+    if ~isempty(missing)
+        warning('No file found for run number(s): %s', num2str(missing));
+    end
+    files = files(ismember(nums, runNumbers));
+    if isempty(files)
+        error('None of the requested run numbers were found.');
+    end
+end
 
 failed = {};
 for k = 1:numel(files)
