@@ -1,0 +1,1 @@
+Conditions: fixed lamp position, x axis is changed to 22kOhms
