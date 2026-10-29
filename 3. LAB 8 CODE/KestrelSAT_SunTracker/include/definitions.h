@@ -65,3 +65,41 @@
 #define TRACK_RELEASE_MS        8000    // RGB LED turns blue: release KestrelSAT
 #define TRACK_CONTROL_MS        10000   // closed-loop control begins
 #define TRACK_DURATION_MS       120000  // test ends automatically after this (or send 'X')
+
+/*---------------------------------------------------------------------------------------------*/
+// Fan momentum unloading -- INCOMPLETE HARDWARE CONFIGURATION, OFF by default.
+// Proposed driver-input pins for the current ESP32 firmware, pending board photo.
+// See the Lab 8 folder's FAN_DESATURATION.md before enabling.
+// Each bank is two fans across opposite Y faces at the SAME Z height, with
+// opposite tangential thrusts. Both fans of a bank switch together through a
+// suitably rated external driver. These are digital enable signals, not fan power.
+#define FAN_DESATURATION_ENABLED false
+#define FAN_WIRING_CONFIRMED     false // no fan GPIOs are touched until confirmed
+#define FAN_TOP_BANK_PIN         27  // proposed GPIO -> top-pair DRIVER input
+#define FAN_BOTTOM_BANK_PIN      4   // proposed GPIO -> bottom-pair DRIVER input (FREE pad)
+#define FAN_TOP_TORQUE_SIGN      0   // +1/-1 from airflow test; bottom must be opposite
+#define FAN_POSITIVE_BANK_PIN    ((FAN_TOP_TORQUE_SIGN > 0) ? FAN_TOP_BANK_PIN : FAN_BOTTOM_BANK_PIN)
+#define FAN_NEGATIVE_BANK_PIN    ((FAN_TOP_TORQUE_SIGN > 0) ? FAN_BOTTOM_BANK_PIN : FAN_TOP_BANK_PIN)
+#define FAN_ACTIVE_HIGH          true
+#define FAN_ENCODER_SIGN         0    // +1/-1 converts RAW encoder RPM to physical +Z
+// Preferred calibration: difference between fan-ON and fan-OFF measured wheel
+// RPM slopes while holding the same target. Use positive magnitudes here;
+// positive/negative refer to physical torque direction, NOT top/bottom wiring.
+// This avoids needing a thrust sensor or an accurate wheel inertia for feedforward.
+#define FAN_CALIBRATION_IN_RPM_S true
+#define FAN_POSITIVE_EQUIV_RPM_S  0.0  // +Z bank: ON slope minus OFF baseline, RPM/s
+#define FAN_NEGATIVE_EQUIV_RPM_S  0.0  // magnitude of negative-Z bank's slope difference
+// Optional alternative for an independently measured torque (select false above).
+#define FAN_POSITIVE_TORQUE_NM    0.0
+#define FAN_NEGATIVE_TORQUE_NM    0.0
+#define FAN_TORQUE_TAU_S          0.5  // provisional rise/decay model; measure before enabling
+#define FAN_TARGET_RPM            0.0
+#define FAN_START_RPM             200.0 // actual wheel-speed trigger, provisional from recorded data
+#define FAN_STOP_RPM              100.0
+#define FAN_COMMAND_START_RPM     300.0 // also trigger at command >=300 with same-sign measured >=150
+#define FAN_UNLOAD_DURING_SLEWS   true  // user permits unloading outside the +/-10 deg pointing band
+#define FAN_START_ERROR_DEG       5.0
+#define FAN_STOP_ERROR_DEG        10.0
+#define FAN_MAX_BODY_RATE_DPS     3.0
+#define FAN_MAX_ON_S              60.0 // latch fans off for this test if continuous run exceeds this
+#define FAN_MAX_CONTROL_DT_S      0.2

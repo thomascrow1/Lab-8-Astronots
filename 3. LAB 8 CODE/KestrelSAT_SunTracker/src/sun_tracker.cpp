@@ -62,14 +62,15 @@ float pointing_error_deg(float sun_direction_deg, float array_axis_deg) {
  * 1. Desired body torque:  tau = Kp * error - Kd * body_rate
  *    (A fixed sun moves clockwise in the body frame when KestrelSAT turns +Z,
  *     so error shrinks when body_rate has the same sign as error.)
- * 2. Reaction torque: the body feels -I_wheel * wheel_accel, so
- *    wheel_accel = -tau / I_wheel.
+ * 2. Body torque is external_torque - I_wheel * wheel_accel, so
+ *    wheel_accel = (external_torque - tau) / I_wheel.
  * 3. Limit wheel acceleration, integrate to a wheel speed command, and keep the
  *    speed between min_rpm and max_rpm (the wheel may spin either way).
  */
 float tracker_step(float error_deg, float body_rate_dps, float dt_s,
                    const TrackerGains &gains, const WheelLimits &limits,
-                   float I_wheel, float &w_cmd_rpm, bool &saturated) {
+                   float I_wheel, float &w_cmd_rpm, bool &saturated,
+                   float external_torque_nm) {
   float error_rad = error_deg / DEG_PER_RAD;
   float rate_rad_s = body_rate_dps / DEG_PER_RAD;
 
@@ -88,7 +89,10 @@ float tracker_step(float error_deg, float body_rate_dps, float dt_s,
     tau = gains.Kp * error_rad;
   }
 
-  float accel_rpm_s = (-tau / I_wheel) * RPM_PER_RAD_S;
+  // I_body * body_accel = fan_torque - I_wheel * wheel_accel.
+  // Counter the fan torque while preserving the PD pointing torque. Positive
+  // wheel speed needs negative fan torque, so it slows without turning the body.
+  float accel_rpm_s = ((external_torque_nm - tau) / I_wheel) * RPM_PER_RAD_S;
   if (accel_rpm_s >  limits.max_accel_rpm_s) accel_rpm_s =  limits.max_accel_rpm_s;
   if (accel_rpm_s < -limits.max_accel_rpm_s) accel_rpm_s = -limits.max_accel_rpm_s;
 

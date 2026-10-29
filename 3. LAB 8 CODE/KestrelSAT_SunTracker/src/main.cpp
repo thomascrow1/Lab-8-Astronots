@@ -97,6 +97,8 @@
 #include <TB9051FTGMotorCarrier.h>                        // Pololu Motor Carrier Library
 #include <ESP32Encoder.h>                                 // Motor encoder library to measure wheel speed
 #include "sun_tracker.h"                                  // Lab 8 sun tracker math (this directory)
+#include "fan_desaturation.h"
+#include <driver/gpio.h>                                  // validate output pins for the selected ESP32
 
 /*---------------------------------------------------------------------------------------------*/
 // Globals:
@@ -138,6 +140,16 @@ float array_axis_deg = SOLAR_ARRAY_AXIS_DEG;
 float bias_pwm = DEFAULT_BIAS_PWM;
 int wheel_pwm_sign = DEFAULT_WHEEL_PWM_SIGN;
 int gyro_sign = DEFAULT_GYRO_SIGN;
+int fan_encoder_sign = FAN_ENCODER_SIGN;
+FanDesaturationConfig fan_config = {
+  FAN_DESATURATION_ENABLED, FAN_TARGET_RPM, FAN_START_RPM, FAN_STOP_RPM,
+  FAN_START_ERROR_DEG, FAN_STOP_ERROR_DEG, FAN_MAX_BODY_RATE_DPS,
+  FAN_CALIBRATION_IN_RPM_S ? fan_equivalent_torque_nm(FAN_POSITIVE_EQUIV_RPM_S, I_WHEEL) : (float)FAN_POSITIVE_TORQUE_NM,
+  FAN_CALIBRATION_IN_RPM_S ? fan_equivalent_torque_nm(FAN_NEGATIVE_EQUIV_RPM_S, I_WHEEL) : (float)FAN_NEGATIVE_TORQUE_NM,
+  FAN_TORQUE_TAU_S,
+  FAN_MAX_ON_S, FAN_MAX_CONTROL_DT_S, FAN_COMMAND_START_RPM, FAN_UNLOAD_DURING_SLEWS
+};
+bool fan_pins_initialized = false;
 
 /*---------------------------------------------------------------------------------------------*/
 // Function Prototypes (see defintiions after loop()):
@@ -166,11 +178,15 @@ void sun_sign_check();
 void sun_track();
 void sun_set_params();
 void sun_print_params();
+bool fan_hardware_ready();
+void setup_fans();
+void set_fan_bank(int bank);
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
 /////////////////////////////////////////////////////////////////////////////////////////////////
 void setup() {
+  setup_fans(); // switch fan drivers off before any startup waits
   Serial.begin(115200); // Begin Serial communication with computer
   while (!Serial) {delay(10);} // Wait for user to open Serial monitor before proceeding
   Serial.println("[INFO] Hello World!");
@@ -353,6 +369,7 @@ void process_main_menu() {
   if (!Xbee.available() && !Serial.available()) return;
 
   int received_int = get_command_from_ground_station();
+  set_fan_bank(0); // fans are used only inside command 13
 
   switch (received_int) {
     case 0:
@@ -1294,6 +1311,65 @@ void stream_RWspeed()
 /*---------------------------------------------------------------------------------------------*/
 // Lab 8 Helpers:
 /*---------------------------------------------------------------------------------------------*/
+// Validate new fan pins without assigning or changing any existing hardware pins.
+bool fan_pins_valid() {
+  const int positive = FAN_POSITIVE_BANK_PIN;
+  const int negative = FAN_NEGATIVE_BANK_PIN;
+  if (positive < 0 || negative < 0 || positive == negative ||
+      !GPIO_IS_VALID_OUTPUT_GPIO(positive) || !GPIO_IS_VALID_OUTPUT_GPIO(negative)) return false;
+  const int reserved[] = {
+    SD_CS_PIN, SPI_SCK, SPI_MISO, SPI_MOSI, XBEE_RX, XBEE_TX,
+    MOTOR_PWM_1_PIN, MOTOR_PWM_2_PIN, ENCODER_PIN_A, ENCODER_PIN_B,
+    SUN_SENSOR_PLUS_X_PIN, SUN_SENSOR_MINUS_X_PIN,
+    SUN_SENSOR_PLUS_Y_PIN, SUN_SENSOR_MINUS_Y_PIN,
+    SDA, SCL, LED_BUILTIN, RGB_BUILTIN,
+    (RGB_BUILTIN >= SOC_GPIO_PIN_COUNT) ? RGB_BUILTIN - SOC_GPIO_PIN_COUNT : RGB_BUILTIN
+  };
+  for (unsigned int i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
+    if (positive == reserved[i] || negative == reserved[i]) return false;
+  }
+  return true;
+}
+
+bool fan_hardware_ready() {
+  // Leave half the configured wheel acceleration available for pointing.
+  const float wheel_torque_margin = 0.5f * I_WHEEL * wheel_limits.max_accel_rpm_s / 9.54929659f;
+  return fan_pins_initialized && fan_config.enabled && fan_config_valid(fan_config) &&
+      (fan_encoder_sign == 1 || fan_encoder_sign == -1) &&
+      (FAN_TOP_TORQUE_SIGN == 1 || FAN_TOP_TORQUE_SIGN == -1) &&
+      fan_config.target_rpm - fan_config.start_rpm >= wheel_limits.min_rpm &&
+      fan_config.target_rpm + fan_config.start_rpm <= wheel_limits.max_rpm &&
+      fan_config.target_rpm - fan_config.command_start_rpm >= wheel_limits.min_rpm &&
+      fan_config.target_rpm + fan_config.command_start_rpm <= wheel_limits.max_rpm &&
+      fan_config.positive_torque_nm <= wheel_torque_margin &&
+      fan_config.negative_torque_nm <= wheel_torque_margin;
+}
+
+void setup_fans() {
+  if (!FAN_WIRING_CONFIRMED || !fan_pins_valid()) return;
+  const int off = FAN_ACTIVE_HIGH ? LOW : HIGH;
+  digitalWrite(FAN_POSITIVE_BANK_PIN, off);
+  digitalWrite(FAN_NEGATIVE_BANK_PIN, off);
+  pinMode(FAN_POSITIVE_BANK_PIN, OUTPUT);
+  pinMode(FAN_NEGATIVE_BANK_PIN, OUTPUT);
+  fan_pins_initialized = true;
+}
+
+void set_fan_bank(int bank) {
+  if (!fan_pins_initialized) return;
+  const int off = FAN_ACTIVE_HIGH ? LOW : HIGH;
+  const int on = FAN_ACTIVE_HIGH ? HIGH : LOW;
+  if (!fan_hardware_ready()) bank = 0;
+  // Turn the other bank off first; never command both banks on together.
+  if (bank > 0) {
+    digitalWrite(FAN_NEGATIVE_BANK_PIN, off);
+    digitalWrite(FAN_POSITIVE_BANK_PIN, on);
+  } else {
+    digitalWrite(FAN_POSITIVE_BANK_PIN, off);
+    digitalWrite(FAN_NEGATIVE_BANK_PIN, bank < 0 ? on : off);
+  }
+}
+
 /**
  * @brief Print a line to both USB Serial and XBee.
  */
@@ -1582,8 +1658,13 @@ void sun_sign_check() {
   }
   // +PWM turned body +Z  -> wheel spun -Z for +PWM -> wheel_pwm_sign = -1
   wheel_pwm_sign = (body_turn > 0) ? -1 : 1;
+  // dcount records the encoder direction during that same +PWM pulse.
+  fan_encoder_sign = wheel_pwm_sign * ((dcount > 0) ? 1 : -1);
   print_both(String("[RESULT] wheel_pwm_sign = ") + wheel_pwm_sign);
+  print_both(String("[RESULT] fan_encoder_sign = ") + fan_encoder_sign +
+             " (verify: +Z wheel rotation must read positive RPM)");
   print_both("[INFO] Signs applied for this session. Update DEFAULT_GYRO_SIGN / DEFAULT_WHEEL_PWM_SIGN in definitions.h to keep them.");
+  print_both("[INFO] Also save verified FAN_ENCODER_SIGN in definitions.h before enabling fans.");
 }
 
 /*---------------------------------------------------------------------------------------------*/
@@ -1600,11 +1681,22 @@ void sun_sign_check() {
  *  - 'X' at any time           : wheel stopped, test ends
  */
 void sun_track() {
+  set_fan_bank(0);
+  driver.setOutput(0);
+  FanDesaturationConfig run_fan_config = fan_config;
+  run_fan_config.enabled = fan_hardware_ready();
+  FanDesaturationState fan_state;
+  FanDesaturationOutput fan_output = {0, 0.0f, false};
+  bool fan_fault_reported = false;
+  print_both(run_fan_config.enabled
+      ? "[INFO] Fan unloading configured: command 13 may switch the calibrated fan banks."
+      : "[INFO] Fan unloading OFF: requires enabled config, free output pins, encoder sign and measured torque.");
   char file_name[40];
   if (sd_createDataFile(&dataFile, "SunTrack")) {
     dataFile.println("mcu time(ms),mode,sun_plusX(count),sun_plusY(count),sun_minusX(count),sun_minusY(count),"
                      "sun_mag,sun_direction(deg),error(deg),body_rate(deg/s),mag_X(uT),mag_Y(uT),"
-                     "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated");
+                     "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated,"
+                     "fan_bank,fan_torque_est(N*m),fan_fault,w_RW_physical(RPM)");
     dataFile.flush();
     dataFile.getName(file_name, sizeof(file_name));
     print_both(String("[INFO] Data file created successfully: ") + file_name);
@@ -1644,6 +1736,7 @@ void sun_track() {
 
   while (true) {
     if (abort_requested()) {
+      set_fan_bank(0);
       driver.setOutput(0);
       dataFile.close();
       print_both(String("[CAUTION] Test stopped by user. Wheel stopped. File ") + file_name + " closed.");
@@ -1664,7 +1757,31 @@ void sun_track() {
     float err = pointing_error_deg(sun.direction_deg, array_axis_deg);
     float rate = read_body_rate_dps();
     float w_meas = measure_wheel_rpm();
+    float w_physical = (fan_encoder_sign == 1 || fan_encoder_sign == -1)
+        ? fan_encoder_sign * w_meas : NAN;
+    bool feedback_ok = imu_sensor.status == ICM_20948_Stat_Ok && isfinite(rate) &&
+                       isfinite(err) && isfinite(w_meas);
     bool sun_visible = sun.magnitude >= SUN_LOST_THRESHOLD;
+    if (t >= TRACK_CONTROL_MS && !feedback_ok) {
+      set_fan_bank(0);
+      driver.setOutput(0);
+      dataFile.close();
+      neopixelWrite(RGB_BUILTIN, 255, 0, 0);
+      print_both("[WARN] Invalid IMU/control feedback. Fans and wheel stopped; test ended.");
+      return;
+    }
+
+    // Use actual signed encoder RPM to decide WHEN to unload. The model-based
+    // torque estimate also follows fan coast-down when the electrical bank is off.
+    bool permit_fans = t >= TRACK_CONTROL_MS && t <= TRACK_DURATION_MS &&
+                       sun_visible && feedback_ok;
+    fan_output = fan_desaturation_step(w_physical, err, rate, dt_s,
+                                       permit_fans, run_fan_config, fan_state, w_cmd_rpm);
+    set_fan_bank(fan_output.bank);
+    if (fan_output.fault && !fan_fault_reported) {
+      print_both("[WARN] Fan unloading latched OFF for this test: check feedback, loop timing and maximum runtime.");
+      fan_fault_reported = true;
+    }
 
     // Decide & control:
     const char *mode;
@@ -1682,9 +1799,17 @@ void sun_track() {
         print_both("[INFO] RELEASE KestrelSAT now.");
       }
     } else if (!sun_visible) {
-      mode = "NOSUN"; // keep last wheel command while waiting to see if the sun comes back
+      mode = "NOSUN";
+      // No sun means no pointing update. During the short grace period, still
+      // counter estimated fan coast-down torque with the wheel. With fans off
+      // and zero residual torque this preserves the previous wheel command.
+      if (fan_output.torque_nm != 0.0f) {
+        tracker_step(0.0f, 0.0f, dt_s, tracker_gains, wheel_limits, I_WHEEL,
+                     w_cmd_rpm, saturated, fan_output.torque_nm);
+      }
       if (sun_lost_since == 0) sun_lost_since = now;
       if (now - sun_lost_since > SUN_LOST_TIME_MS) {
+        set_fan_bank(0);
         driver.setOutput(0);
         dataFile.close();
         neopixelWrite(RGB_BUILTIN, 255, 0, 0); // red
@@ -1694,7 +1819,8 @@ void sun_track() {
     } else {
       mode = "TRACK";
       sun_lost_since = 0;
-      tau = tracker_step(err, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
+      tau = tracker_step(err, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL,
+                         w_cmd_rpm, saturated, fan_output.torque_nm);
       if (fabs(err) <= 10.0) neopixelWrite(RGB_BUILTIN, 0, 255, 0);   // green: on target
       else                   neopixelWrite(RGB_BUILTIN, 255, 165, 0); // orange: slewing
     }
@@ -1728,7 +1854,11 @@ void sun_track() {
     dataFile.print(tau, 6);                       dataFile.print(",");
     dataFile.print(w_cmd_rpm, 1);                 dataFile.print(",");
     dataFile.print(w_meas, 1);                    dataFile.print(",");
-    dataFile.println(saturated ? 1 : 0);
+    dataFile.print(saturated ? 1 : 0);            dataFile.print(",");
+    dataFile.print(fan_output.bank);             dataFile.print(",");
+    dataFile.print(fan_output.torque_nm, 6);      dataFile.print(",");
+    dataFile.print(fan_output.fault ? 1 : 0);     dataFile.print(",");
+    dataFile.println(w_physical, 1);
 
     // Telemetry (Name:value for GCS plotter): every point on USB, 2 Hz on XBee
     String s = "t:" + String(t) + ",err:" + String(err, 1) + ",gZ:" + String(rate, 2) +
@@ -1737,7 +1867,9 @@ void sun_track() {
                // same sun sensor fields as command 11, so the GCS Sun Map works during tracking
                ",mag:" + String(sun.magnitude, 2) +
                ",n+X:" + String(sun.norm[SUN_PX], 2) + ",n+Y:" + String(sun.norm[SUN_PY], 2) +
-               ",n-X:" + String(sun.norm[SUN_MX], 2) + ",n-Y:" + String(sun.norm[SUN_MY], 2);
+               ",n-X:" + String(sun.norm[SUN_MX], 2) + ",n-Y:" + String(sun.norm[SUN_MY], 2) +
+               ",fan:" + String(fan_output.bank) + ",fanTau:" + String(fan_output.torque_nm, 6) +
+               ",fanFault:" + String(fan_output.fault ? 1 : 0);
     Serial.println(s);
     if (test_point_count % 10 == 0) {
       dataFile.flush(); // save file every 10 test points
@@ -1746,6 +1878,7 @@ void sun_track() {
 
     // End test if complete:
     if (t > TRACK_DURATION_MS) {
+      set_fan_bank(0);
       driver.setOutput(0);
       dataFile.close();
       print_both(String("[INFO] Sun tracker test complete. Wheel stopped. File ") + file_name + " closed.");
@@ -1765,6 +1898,12 @@ void sun_print_params() {
              " db=" + String(tracker_gains.deadband_deg, 1) + " rate=" + String(tracker_gains.max_rate_dps, 0) +
              " bias=" + String(bias_pwm, 2) +
              " axis=" + String(array_axis_deg, 1) + " wsign=" + wheel_pwm_sign + " gsign=" + gyro_sign);
+  print_both(String("fan_ready=") + (fan_hardware_ready() ? 1 : 0) +
+             " fan_encoder_sign=" + fan_encoder_sign + " start_rpm=" + String(fan_config.start_rpm, 0) +
+             " stop_rpm=" + String(fan_config.stop_rpm, 0));
+  print_both(String("fan_cal_units=") + (FAN_CALIBRATION_IN_RPM_S ? "RPM/s" : "N*m") +
+             " positive_effect_RPM_s=" + String(fan_config.positive_torque_nm * 9.54929659f / I_WHEEL, 3) +
+             " negative_effect_RPM_s=" + String(fan_config.negative_torque_nm * 9.54929659f / I_WHEEL, 3));
   String cal = "cal dark/bright (+X,+Y,-X,-Y): ";
   for (int i = 0; i < 4; i++) cal += String(sun_cal.dark[i], 0) + "/" + String(sun_cal.bright[i], 0) + " ";
   print_both(cal);

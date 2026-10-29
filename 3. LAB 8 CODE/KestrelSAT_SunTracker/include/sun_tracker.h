@@ -55,10 +55,12 @@ float pointing_error_deg(float sun_direction_deg, float array_axis_deg);
 //   dt_s          : time since last step (s)
 //   w_cmd_rpm     : current wheel speed command (RPM), updated in place
 //   saturated     : set true if the wheel hit a speed limit this step
+//   external_torque_nm : estimated fan body torque about +Z (default: no fans)
 // Returns the desired body torque (N*m) for logging.
 float tracker_step(float error_deg, float body_rate_dps, float dt_s,
                    const TrackerGains &gains, const WheelLimits &limits,
-                   float I_wheel, float &w_cmd_rpm, bool &saturated);
+                   float I_wheel, float &w_cmd_rpm, bool &saturated,
+                   float external_torque_nm = 0.0f);
 
 // Wheel speed to send to the motor so the (laggy) wheel follows w_cmd_rpm.
 //   max_rpm : wheel speed at 100% PWM (RPM_PER_PWM)

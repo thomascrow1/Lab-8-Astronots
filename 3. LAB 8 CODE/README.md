@@ -1,5 +1,11 @@
 # KestrelSAT Sun Tracker (Astro 331 Lab 8)
 
+Fan-assisted wheel unloading is integrated into command 13 and **disabled until
+the hardware configuration is confirmed**. See [FAN_DESATURATION.md](FAN_DESATURATION.md)
+for geometry, assumptions, wiring/calibration inputs, and verification. The
+older gain/bias examples and simulation results below predate this addition;
+current defaults are in `include/definitions.h`.
+
 Closed-loop sun pointing about KestrelSAT's Z axis. The Lab 6 four-phototransistor sun sensor
 measures where the sun is. The ICM-20948 gyro measures body rate. The Lab 7 reaction wheel turns
 the satellite until the **solar array (−X face, 180°)** points at the light.

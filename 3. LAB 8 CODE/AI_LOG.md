@@ -1,5 +1,82 @@
 # GenAI Use Log (Lab 8, GenAI Level 4)
 
+## 2026-10-29: XY-MOS photos and calibration using relative wheel response
+
+**Tool:** Codex desktop with independent calibration review and simulation subagents.
+**Request:** Review additional wiring photos and determine whether relative
+thrust can replace measured thrust data. User also asked what TRIG/PWM means.
+
+**Photo observations:** Modules visibly say XY-MOS with VIN+/VIN-, OUT+/OUT-,
+GND and TRIG/PWM labels. Power/load wires are visible; exact GPIO control,
+common-ground paths and breadboard contact mapping remain unverified. Updated
+the guide to these actual terminal labels instead of the earlier Adafruit example.
+Explained trigger HIGH/LOW, common ground, and full-ON/OFF rather than assuming
+two-wire brushless fan thrust varies linearly with PWM. No pin assignments changed.
+
+**Changes:** Added preferred RPM/s calibration settings, all zero by default,
+and `fan_equivalent_torque_nm()`. Calibrate each bank from measured physical
+wheel RPM slope ON minus comparable OFF baselines while freely hanging under
+stable closed-loop pointing. Relative bank ratios alone need one measured scale.
+The converted equivalent torque uses the same configured wheel inertia as the
+tracker; inertia cancels from fan feedforward. Model torque is not measured Nm.
+Documented comparable body acceleration/disturbance assumptions and exclusion of
+transients/saturation. A physical thrust sensor and accurate wheel inertia are
+not required for this method. It does not automate calibration pulses.
+
+**Verified:** 22 Python control/simulation tests pass; one optional host C++
+parity check is skipped because no host compiler is installed. The new physical
+plant test checks both signs with real wheel inertia different from configured
+inertia. PlatformIO compilation succeeds. Fan actuation stays disabled and
+response settings remain zero; nothing was uploaded or operated on hardware.
+
+**Still required:** Trace and verify TRIG/PWM and common ground, exact controller
+GPIO labels, regulated fan supply, airflow torque signs, encoder sign, and the
+recorded reverse-drive/timing issues. Obtain per-bank ON/OFF response data and
+rise/decay before enabling automatic unloading.
+
+## 2026-10-29: Fan-assisted wheel unloading (hardware confirmation pending)
+
+**Tool:** Codex desktop with independent control review and simulation/test subagents.
+**Request:** Use four LD3007MS 5 V fans to unload reaction-wheel momentum while
+continuing sun pointing. The user confirmed fan centers Y = +/-0.32 m (radius),
+Z = +/-0.02 m, fans face X; top fans share one two-wire bank and bottom fans
+share another. Unloading is allowed during slews; on-target requirement is +/-10 degrees.
+
+**Changes:** Added hardware-free `fan_desaturation.h/.cpp`, integrated into
+command 13, and mirrored it in the Python simulation. Positive wheel momentum
+selects negative fan torque; the wheel integrates `(fan_torque - pointing_torque)/I_wheel`.
+Supervisor includes measured/command speed hysteresis, near-target gates,
+slew unloading, timeout, feedback/timing faults and modeled fan coast-down.
+Command 12 also estimates encoder sign. SD/telemetry include fan state/torque/fault.
+Proposed new driver-input pins: top GPIO27, bottom GPIO4 (FREE connection).
+No existing pin was changed. `FAN_WIRING_CONFIRMED=false`, fan enable=false,
+fan torque=0, and torque/encoder signs=0 prevent unconfirmed fan actuation.
+Added `FAN_DESATURATION.md` with geometry, wiring through two 3.3 V-compatible
+MOSFET drivers, calibration, assumptions and recorded-data findings.
+
+**Data review:** Existing command limit is +/-400 RPM, not a verified motor
+maximum. Older runs 045-046 show roughly +/-350 measured RPM at full command;
+recent 050-052 show near-zero measured RPM during sustained reverse commands.
+Run 052 has seven roughly 1.02 s control gaps. These need hardware/timing checkout.
+Initial settings are actual 200 RPM start /100 stop, or command >=300 with
+same-sign measured >=150; these are provisional, not measured fan performance.
+
+**Verified:** PlatformIO `esp32thing_plus` build succeeds (RAM 24,120 bytes,
+flash 399,549 bytes). Used short temporary library/build directories to avoid
+Windows dependency filename-length errors. Headless unittest: 21 passed,
+one optional host C++/Python runtime comparison skipped because no host C++
+compiler is installed; the actual ESP32 C++ firmware compiles. Tests cover both
+directions, command hysteresis, geometry, slew unloading, motor lag/stall,
+thrust mismatch, coast-down, faults, timing, sun loss and torque limits.
+Synthetic mismatched fan models unload both signs from +/-250 to about +/-104
+RPM; this is not an LD3007MS thrust measurement or hardware accuracy claim.
+
+**Still required:** Close-up board/fan/wiring photos; airflow and torque sign
+verification; confirm parallel fan wiring, driver, 5 V supply and current;
+measure installed torque and rise/decay; check reverse wheel drive and control
+gaps; upload only after configuration and verify both directions, pointing,
+abort, sun loss and runtime/timing faults on the satellite. Nothing was uploaded.
+
 One entry per agent session. Record what the agent made, what we changed, and how we verified it.
 
 ## 2026-10-06 · Sun tracker plan + initial implementation
