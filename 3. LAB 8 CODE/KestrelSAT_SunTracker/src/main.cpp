@@ -49,8 +49,6 @@
  * | 12  | Lab 8: Sign check (wheel pulse vs gyro & sun sensor) |
  * | 13  | Lab 8: Run sun tracker (closed-loop, logs to SD) |
  * | 14  | Lab 8: Print / set sun tracker parameters |
- * | 15  | Lab 8: Attitude determination check (sun sensor + gyro, PASS/FAIL) |
- * | 16  | Lab 8: Phototransistor resistor sweep (logs to SD) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -168,9 +166,6 @@ void sun_sign_check();
 void sun_track();
 void sun_set_params();
 void sun_print_params();
-void sample_sun_stats(int n, float mean[4], float sd[4]);
-void ad_check();
-void pt_sweep();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
@@ -343,7 +338,7 @@ int get_command_from_ground_station()
  * - 7: Run Lab 7 - Test A (tabletop static test)
  * - 8: Run Lab 7 - Test B
  * - 9: Stream reaction wheel speed
- * - 10-16: Lab 8 sun tracker commands (see sun tracker section below)
+ * - 10-14: Lab 8 sun tracker commands (see sun tracker section below)
  * - 98: SD Card - List files (USB Serial only)
  * - 99: SD Card - Print file menu (USB Serial only)
  *
@@ -382,8 +377,6 @@ void process_main_menu() {
       Xbee.print("12 - Lab 8: Sign Check (wheel pulse)\n");
       Xbee.print("13 - Lab 8: Run Sun Tracker\n");
       Xbee.print("14 - Lab 8: Print/Set Tracker Parameters\n");
-      Xbee.print("15 - Lab 8: Attitude Determination Check\n");
-      Xbee.print("16 - Lab 8: Phototransistor Resistor Sweep\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
@@ -402,8 +395,6 @@ void process_main_menu() {
       Serial.print("12 - Lab 8: Sign Check (wheel pulse)\n");
       Serial.print("13 - Lab 8: Run Sun Tracker\n");
       Serial.print("14 - Lab 8: Print/Set Tracker Parameters\n");
-      Serial.print("15 - Lab 8: Attitude Determination Check\n");
-      Serial.print("16 - Lab 8: Phototransistor Resistor Sweep\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -461,14 +452,6 @@ void process_main_menu() {
 
     case 14:
       sun_set_params();
-      break;
-
-    case 15:
-      ad_check();
-      break;
-
-    case 16:
-      pt_sweep();
       break;
 
     case 98:
@@ -1817,304 +1800,4 @@ void sun_set_params() {
     sun_print_params();
   }
   print_both("[INFO] Parameters set.");
-}
-
-/*---------------------------------------------------------------------------------------------*/
-// Shared helper for commands 15 and 16
-/*---------------------------------------------------------------------------------------------*/
-/**
- * @brief Take n sun sensor readings and return the mean and standard deviation of each
- *        channel (order +X, +Y, -X, -Y, raw ADC counts).
- */
-void sample_sun_stats(int n, float mean[4], float sd[4]) {
-  float sum[4] = {0, 0, 0, 0};
-  float sumsq[4] = {0, 0, 0, 0};
-  float raw[4];
-  for (int k = 0; k < n; k++) {
-    read_sun_raw(raw);
-    for (int i = 0; i < 4; i++) {
-      sum[i] += raw[i];
-      sumsq[i] += raw[i] * raw[i];
-    }
-    delay(5);
-  }
-  for (int i = 0; i < 4; i++) {
-    mean[i] = sum[i] / n;
-    float var = sumsq[i] / n - mean[i] * mean[i];
-    sd[i] = (var > 0) ? sqrt(var) : 0.0;
-  }
-}
-
-/*---------------------------------------------------------------------------------------------*/
-// Lab 8 Command 15: Attitude Determination Check
-/*---------------------------------------------------------------------------------------------*/
-/**
- * @brief Guided checkout of the sun sensor and gyro (wheel off). Prints PASS/FAIL for each step
- *        and logs the sun sensor steps to ADCheck_dataNNN.csv.
- *
- * Steps (user sends any key to advance, 's' to skip a step, 'X' to cancel):
- *  1. Light off      -> every channel should read low and steady, no "sun" seen
- *  2. Light on 8 spots (4 faces + 4 corners, every 45 deg) -> sun direction within AD_TOL_DEG
- *  3. KestrelSAT still for 3 s -> gyro bias and noise
- *  4. Light fixed, user turns KestrelSAT ~90 deg by hand -> gyro angle must match sun sensor angle
- *
- * Run command 10 (calibrate) first if the sun sensor wiring changed.
- */
-void ad_check() {
-  const float AD_TOL_DEG = 15.0;   // sun direction must be within this of expected
-  const int n_samples = 50;
-  const char *spot_names[8] = {"+X face", "+X/+Y corner", "+Y face", "+Y/-X corner",
-                               "-X face (solar array)", "-X/-Y corner", "-Y face", "-Y/+X corner"};
-  const char *ch_names[4] = {"+X", "+Y", "-X", "-Y"};
-  float mean[4], sd[4];
-  int n_pass = 0, n_fail = 0;
-  char file_name[40];
-
-  driver.setOutput(0);
-  if (sd_createDataFile(&dataFile, "ADCheck")) {
-    dataFile.println("step,expected(deg),measured(deg),error(deg),sun_mag,"
-                     "sun_plusX(count),sun_plusY(count),sun_minusX(count),sun_minusY(count),result");
-    dataFile.flush();
-    dataFile.getName(file_name, sizeof(file_name));
-    print_both(String("[INFO] Data file created successfully: ") + file_name);
-  } else {
-    print_both("[CAUTION] Failed to create data file. Running the check without logging.");
-    file_name[0] = '\0';
-  }
-
-  print_both("[INFO] ATTITUDE DETERMINATION CHECK (wheel off). Any key = go, 's' = skip step, 'X' = cancel.");
-  print_both("[INFO] If you changed the sun sensor wiring, run 10 (calibrate) first.");
-
-  // ---------- Step 1: light off ----------
-  print_both("[INFO] Step 1: turn OFF the light source, then send any key.");
-  String line = wait_for_line();
-  if (line.equalsIgnoreCase("x")) { if (file_name[0]) dataFile.close(); driver.setOutput(0); print_both("[INFO] Check canceled."); return; }
-  if (!line.equalsIgnoreCase("s")) {
-    sample_sun_stats(n_samples, mean, sd);
-    SunReading sun = compute_sun(mean, sun_cal);
-    bool ok = true;
-    for (int i = 0; i < 4; i++) {
-      String msg = String("  ") + ch_names[i] + ": " + String(mean[i], 0) + " counts (noise " + String(sd[i], 1) + ")";
-      if (mean[i] > 4000) { msg += "  <-- reads FULL SCALE in the dark: output shorted to 3.3V or resistor missing?"; ok = false; }
-      if (sd[i] > 50)     { msg += "  <-- very noisy: loose wire, floating pin, or missing ground?"; ok = false; }
-      print_both(msg);
-    }
-    if (sun.magnitude >= SUN_LOST_THRESHOLD) {
-      print_both(String("  Sun magnitude ") + String(sun.magnitude, 2) + " with the light off: room light looks like sun. Recalibrate (10) in these room conditions.");
-      ok = false;
-    }
-    print_both(String("[RESULT] Step 1 dark check: ") + (ok ? "PASS" : "FAIL"));
-    ok ? n_pass++ : n_fail++;
-    if (file_name[0]) {
-      dataFile.println(String("DARK,,,,") + String(sun.magnitude, 3) + "," + String(mean[0], 1) + "," + String(mean[1], 1) +
-                       "," + String(mean[2], 1) + "," + String(mean[3], 1) + "," + (ok ? "PASS" : "FAIL"));
-      dataFile.flush();
-    }
-  }
-
-  // ---------- Step 2: light on 8 spots ----------
-  for (int k = 0; k < 8; k++) {
-    float expected = k * 45.0;
-    print_both(String("[INFO] Step 2.") + (k + 1) + ": light ON, pointed at the " + spot_names[k] +
-               " (expect " + String(expected, 0) + " deg). Send any key ('s' to skip).");
-    line = wait_for_line();
-    if (line.equalsIgnoreCase("x")) { if (file_name[0]) dataFile.close(); driver.setOutput(0); print_both("[INFO] Check canceled."); return; }
-    if (line.equalsIgnoreCase("s")) continue;
-
-    sample_sun_stats(n_samples, mean, sd);
-    SunReading sun = compute_sun(mean, sun_cal);
-    float err = wrap180(sun.direction_deg - expected);
-    bool ok = (fabs(err) <= AD_TOL_DEG) && (sun.magnitude >= SUN_LOST_THRESHOLD);
-
-    print_both(String("  sDir:") + String(sun.direction_deg, 1) + " err:" + String(err, 1) + " mag:" + String(sun.magnitude, 2) +
-               "  raw(+X,+Y,-X,-Y): " + String(mean[0], 0) + "," + String(mean[1], 0) + "," + String(mean[2], 0) + "," + String(mean[3], 0) +
-               "  n: " + String(sun.norm[0], 2) + "," + String(sun.norm[1], 2) + "," + String(sun.norm[2], 2) + "," + String(sun.norm[3], 2));
-    if (sun.magnitude < SUN_LOST_THRESHOLD) print_both("  No sun seen: is the light on / close enough?");
-    for (int i = 0; i < 4; i++) {
-      if (mean[i] > 4090) print_both(String("  ") + ch_names[i] + " is SATURATED (4095): try a smaller resistor or move the light back.");
-    }
-    if (k % 2 == 0) { // on a face: that face should be the brightest channel
-      int face_ch[4] = {SUN_PX, SUN_PY, SUN_MX, SUN_MY};
-      int ch = face_ch[k / 2];
-      for (int i = 0; i < 4; i++) {
-        if (i != ch && sun.norm[i] > sun.norm[ch]) {
-          print_both(String("  ") + ch_names[i] + " is brighter than " + ch_names[ch] + ": wires swapped between pins?");
-          ok = false;
-        }
-      }
-    }
-    print_both(String("[RESULT] Step 2.") + (k + 1) + " " + spot_names[k] + ": " + (ok ? "PASS" : "FAIL") +
-               " (|err| " + String(fabs(err), 1) + " deg, limit " + String(AD_TOL_DEG, 0) + ")");
-    ok ? n_pass++ : n_fail++;
-    if (file_name[0]) {
-      dataFile.println(String("SPOT_") + String(expected, 0) + "," + String(expected, 1) + "," + String(sun.direction_deg, 1) + "," +
-                       String(err, 1) + "," + String(sun.magnitude, 3) + "," + String(mean[0], 1) + "," + String(mean[1], 1) + "," +
-                       String(mean[2], 1) + "," + String(mean[3], 1) + "," + (ok ? "PASS" : "FAIL"));
-      dataFile.flush();
-    }
-  }
-
-  // ---------- Step 3: gyro bias ----------
-  float gyro_bias = 0.0;
-  print_both("[INFO] Step 3: hold KestrelSAT completely STILL (or set it on the table), then send any key. Takes 3 s.");
-  line = wait_for_line();
-  if (line.equalsIgnoreCase("x")) { if (file_name[0]) dataFile.close(); driver.setOutput(0); print_both("[INFO] Check canceled."); return; }
-  if (!line.equalsIgnoreCase("s")) {
-    float sum = 0, sumsq = 0;
-    int n = 0;
-    uint32_t t_end = millis() + 3000;
-    while (millis() < t_end) {
-      float r = read_body_rate_dps();
-      sum += r;
-      sumsq += r * r;
-      n++;
-      delay(20);
-    }
-    gyro_bias = sum / n;
-    float var = sumsq / n - gyro_bias * gyro_bias;
-    float noise = (var > 0) ? sqrt(var) : 0.0;
-    bool ok = (fabs(gyro_bias) < 2.0) && (noise < 1.0) && (noise > 0.0);
-    print_both(String("  gyro Z bias: ") + String(gyro_bias, 3) + " deg/s, noise: " + String(noise, 3) + " deg/s (" + n + " samples)");
-    if (noise == 0.0) print_both("  Gyro reading never changed: IMU frozen or not updating?");
-    print_both(String("[RESULT] Step 3 gyro still: ") + (ok ? "PASS" : "FAIL") + " (limits: |bias| < 2, noise < 1 deg/s)");
-    ok ? n_pass++ : n_fail++;
-  }
-
-  // ---------- Step 4: hand rotation, gyro vs sun sensor ----------
-  print_both("[INFO] Step 4: light ON and FIXED, pointed at the -X face. Send any key, then slowly turn KestrelSAT by hand");
-  print_both("[INFO]   about 90 deg counter-clockwise seen from above (light should end on the +Y face), then send any key.");
-  line = wait_for_line();
-  if (line.equalsIgnoreCase("x")) { if (file_name[0]) dataFile.close(); driver.setOutput(0); print_both("[INFO] Check canceled."); return; }
-  if (!line.equalsIgnoreCase("s")) {
-    float raw[4];
-    read_sun_raw(raw);
-    SunReading sun0 = compute_sun(raw, sun_cal);
-    float gyro_angle = 0.0;
-    uint32_t t_last = millis();
-    uint32_t t_print = t_last;
-    print_both("[INFO] Turn now. Send any key when done.");
-    while (!Serial.available() && !Xbee.available()) {
-      uint32_t now = millis();
-      if (now - t_last < 20) continue;
-      gyro_angle += (read_body_rate_dps() - gyro_bias) * (now - t_last) / 1000.0;
-      t_last = now;
-      if (now - t_print > 500) { t_print = now; print_both(String("  gyro angle: ") + String(gyro_angle, 1) + " deg"); }
-    }
-    wait_for_line(); // clear the key
-    read_sun_raw(raw);
-    SunReading sun1 = compute_sun(raw, sun_cal);
-    // A fixed light moves the OPPOSITE way in the body frame when the body turns.
-    float sun_turn = -wrap180(sun1.direction_deg - sun0.direction_deg);
-    float diff = gyro_angle - sun_turn;
-    bool ok = (fabs(diff) <= AD_TOL_DEG) && (fabs(gyro_angle) > 30.0);
-    print_both(String("  body turn from gyro: ") + String(gyro_angle, 1) + " deg, from sun sensor: " + String(sun_turn, 1) +
-               " deg (sDir " + String(sun0.direction_deg, 1) + " -> " + String(sun1.direction_deg, 1) + ")");
-    if (fabs(gyro_angle) <= 30.0) print_both("  Gyro saw less than 30 deg of turn: turn further, or gyro not working.");
-    else if (gyro_angle * sun_turn < 0) print_both("  Gyro and sun sensor turned OPPOSITE ways: gyro_sign is flipped (14 -> gsign) or sun sensor pins swapped.");
-    print_both(String("[RESULT] Step 4 gyro vs sun sensor: ") + (ok ? "PASS" : "FAIL") + " (difference " + String(diff, 1) +
-               " deg, limit " + String(AD_TOL_DEG, 0) + ")");
-    ok ? n_pass++ : n_fail++;
-    if (file_name[0]) {
-      dataFile.println(String("ROTATION,") + String(gyro_angle, 1) + "," + String(sun_turn, 1) + "," + String(diff, 1) + "," +
-                       String(sun1.magnitude, 3) + "," + String(raw[0], 1) + "," + String(raw[1], 1) + "," + String(raw[2], 1) + "," +
-                       String(raw[3], 1) + "," + (ok ? "PASS" : "FAIL"));
-    }
-  }
-
-  driver.setOutput(0);
-  if (file_name[0]) dataFile.close();
-  print_both(String("[RESULT] ATTITUDE DETERMINATION CHECK: ") + n_pass + " passed, " + n_fail + " failed." +
-             (file_name[0] ? String(" File ") + file_name + " closed." : String("")));
-}
-
-/*---------------------------------------------------------------------------------------------*/
-// Lab 8 Command 16: Phototransistor Resistor Sweep
-/*---------------------------------------------------------------------------------------------*/
-/**
- * @brief Record sun sensor brightness for different phototransistor resistor values.
- *        Logs to PTSweep_dataNNN.csv; plot with analysis/plot_ptsweep.py.
- *
- * For each resistor value (the user swaps the resistors by hand):
- *  1. User sends the resistor value in ohms (e.g. "4700", "10k", "1M")
- *  2. Light off               -> DARK row (all 4 channels)
- *  3. Light on each face      -> LIGHT_+X, LIGHT_+Y, LIGHT_-X, LIGHT_-Y rows (all 4 channels)
- * Send 'done' at the resistor prompt to finish. 's' skips a step, 'X' cancels.
- *
- * Keep the light at the SAME distance and angle for every resistor so only R changes.
- */
-void pt_sweep() {
-  const int n_samples = 200;
-  const char *ch_names[4] = {"+X", "+Y", "-X", "-Y"};
-  const char *conditions[5] = {"DARK", "LIGHT_+X", "LIGHT_+Y", "LIGHT_-X", "LIGHT_-Y"};
-  const char *header = "resistor(ohm),condition,mean_plusX(count),mean_plusY(count),mean_minusX(count),mean_minusY(count),"
-                       "std_plusX(count),std_plusY(count),std_minusX(count),std_minusY(count)";
-  float mean[4], sd[4];
-  char file_name[40];
-
-  driver.setOutput(0);
-  if (sd_createDataFile(&dataFile, "PTSweep")) {
-    dataFile.println(header);
-    dataFile.flush();
-    dataFile.getName(file_name, sizeof(file_name));
-    print_both(String("[INFO] Data file created successfully: ") + file_name);
-  } else {
-    print_both("[CAUTION] Failed to create data file. Rows will only be printed; copy them from the Serial monitor.");
-    file_name[0] = '\0';
-  }
-
-  print_both("[INFO] PHOTOTRANSISTOR RESISTOR SWEEP. Keep the light at the SAME distance/angle for every resistor.");
-  print_both(header);
-
-  while (true) {
-    print_both("[INFO] Install the resistor(s), then send the value in ohms (e.g. 4700, 10k, 1M). Send 'done' to finish.");
-    String line = wait_for_line();
-    line.toLowerCase();
-    if (line == "done" || line == "x") break;
-    float r_ohm = line.toFloat();
-    if (line.endsWith("k")) r_ohm *= 1000.0;
-    if (line.endsWith("m")) r_ohm *= 1000000.0;
-    if (r_ohm <= 0) { print_both("[CAUTION] Could not read a resistor value. Example: 10k"); continue; }
-
-    float dark[4] = {NAN, NAN, NAN, NAN};
-    float bright[4] = {NAN, NAN, NAN, NAN};
-    float bright_sd[4] = {NAN, NAN, NAN, NAN};
-    bool canceled = false;
-    for (int c = 0; c < 5; c++) {
-      if (c == 0) print_both(String("[INFO] R = ") + String(r_ohm, 0) + " ohm. Turn the light OFF, then send any key ('s' to skip).");
-      else        print_both(String("[INFO] Light ON, pointed straight at the ") + ch_names[c - 1] + " face, then send any key ('s' to skip).");
-      String key = wait_for_line();
-      if (key.equalsIgnoreCase("x")) { canceled = true; break; }
-      if (key.equalsIgnoreCase("s")) continue;
-
-      sample_sun_stats(n_samples, mean, sd);
-      String row = String(r_ohm, 0) + "," + conditions[c];
-      for (int i = 0; i < 4; i++) row += "," + String(mean[i], 1);
-      for (int i = 0; i < 4; i++) row += "," + String(sd[i], 2);
-      print_both(row);
-      if (file_name[0]) { dataFile.println(row); dataFile.flush(); }
-
-      if (c == 0) for (int i = 0; i < 4; i++) dark[i] = mean[i];
-      else { bright[c - 1] = mean[c - 1]; bright_sd[c - 1] = sd[c - 1]; }
-    }
-    if (canceled) break;
-
-    // Quick summary for this resistor: brightness span of each channel
-    for (int i = 0; i < 4; i++) {
-      if (isnan(bright[i])) continue;
-      String s = String("  ") + ch_names[i] + ": bright " + String(bright[i], 0);
-      if (!isnan(dark[i])) s += " dark " + String(dark[i], 0) + " span " + String(bright[i] - dark[i], 0);
-      s += " noise " + String(bright_sd[i], 1);
-      if (bright[i] > 4000) s += "  SATURATED: R too big (or light too close)";
-      print_both(s);
-    }
-  }
-
-  driver.setOutput(0);
-  if (file_name[0]) {
-    dataFile.close();
-    print_both(String("[INFO] Sweep finished. File ") + file_name + " closed. Plot it with: python analysis/plot_ptsweep.py " + file_name);
-  } else {
-    print_both("[INFO] Sweep finished.");
-  }
-  print_both("[INFO] After installing the resistor you pick, re-run 10 (calibrate) and paste the new sun_cal line.");
 }

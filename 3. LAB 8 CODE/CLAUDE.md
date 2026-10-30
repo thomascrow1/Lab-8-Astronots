@@ -17,7 +17,7 @@
 - Pin map: `include/definitions.h`.
 
 ## Conventions
-- Commands are dispatched in `process_main_menu()`. Lab 8 uses 10–16.
+- Commands are dispatched in `process_main_menu()`. Lab 8 uses 10–14.
 - Telemetry format is `Name:value,Name:value`. Mirror every XBee message to Serial (`print_both()`).
 - Sun direction: 0° = +X, counter-clockwise (+Z) positive. Error = wrap180(sun_dir − array_axis).
 - Wheel speed is positive when spinning about +Z. Convert to PWM with `wheel_pwm_sign`.
