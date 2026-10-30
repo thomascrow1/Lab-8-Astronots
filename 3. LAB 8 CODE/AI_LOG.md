@@ -102,3 +102,15 @@ One entry per agent session. Record what the agent made, what we changed, and ho
 - Gains: wn 3 rad/s, zeta 1.3 (overdamped): Kp 0.126, Kd 0.1092.
 - tracker_step now writes PD as "turn at a desired rate": rate_des = (Kp/Kd)·err, capped at `max_rate_dps` (default 90°/s), tau = Kd·(rate_des - rate). This is identical to PD below the cap. The cap can be changed with command 14 `rate`. Mirrored in the sim.
 **Verified (no hardware):** PlatformIO build succeeds; the C++ matches the Python sim. Sim with 1.1 s motor lag, settle to 5° / overshoot: 30° 1.4 s / 0.5°, 90° 2.2 s / 0.4°, 170° 3.2 s / 0.4°; cable spring 2.5 s / 0°; motor lag 0.7-1.6 s 1.9-2.2 s / ≤0.5° (overshoot is at sensor-noise level).
+
+## 2026-10-30: Post-rewire checkout (command 15) + phototransistor resistor sweep (command 16)
+
+**Changed:**
+- `main.cpp` command 15 `ad_check()`: guided attitude determination check, wheel off. Light off (flags full-scale, noisy, or room light seen as sun), light at 8 spots every 45° (PASS if within ±15°, flags saturated channels and swapped pins), gyro still for 3 s (bias/noise), then a hand turn of ~90° comparing gyro angle to sun sensor angle (catches a flipped gyro_sign). Logs `ADCheck_dataNNN.csv`.
+- `main.cpp` command 16 `pt_sweep()`: for each resistor value typed in, records mean/std of all 4 channels with the light off and on each face. Logs `PTSweep_dataNNN.csv` and prints each row so the data can be copied if the SD card fails.
+- New `analysis/plot_ptsweep.py` (brightness, span, photocurrent vs R; best R = biggest worst-channel span with nothing above 3900 counts) and `analysis/plot_adcheck.py`.
+- Note: a git merge put back the old main.cpp; the new code was restored from the "main 2.cpp" copy in commit 5401082.
+**Agent verified (no hardware):** PlatformIO build succeeds. Both plot scripts run on made-up data and pick the expected answer.
+**We must verify on hardware:**
+- [ ] Run 10 (recalibrate after the rewire), then 15; all 8 spots and the hand turn should PASS
+- [ ] Run 16 with each resistor at a fixed light distance; plot it, install the best R, then rerun 10 and paste the new sun_cal line

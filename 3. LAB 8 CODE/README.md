@@ -21,6 +21,8 @@ the satellite until the **solar array (−X face, 180°)** points at the light.
 | `KestrelSAT_SunTracker/include/definitions.h` | Pins plus all sun tracker settings (gains, limits, timing, signs). |
 | `sim/sun_tracker_sim.py` | 1-axis body + wheel + sun sensor simulation. Uses the same controller as the firmware. |
 | `analysis/plot_suntrack.py` | Plots a `SunTrack_dataNNN.csv` from the SD card and scores it against R1/R2. |
+| `analysis/plot_adcheck.py` | Plots an `ADCheck_dataNNN.csv` (command 15): measured vs expected sun direction. |
+| `analysis/plot_ptsweep.py` | Plots `PTSweep_dataNNN.csv` (command 16): brightness, signal span and photocurrent vs resistor; recommends one. |
 | `CLAUDE.md` | Project rules for coding agents. |
 | `AI_LOG.md` | GenAI use log required by the Lab 8 guidance. |
 
@@ -42,6 +44,8 @@ the satellite until the **solar array (−X face, 180°)** points at the light.
 | 12 | **Sign check.** Pulses the wheel +30% for 1 s, then sets `gyro_sign` and `wheel_pwm_sign` from how the body turned. |
 | 13 | **Run sun tracker.** Spin-up (hold the satellite) → LED **blue** = release → closed-loop tracking. Logs `SunTrack_dataNNN.csv`. Send `X` to stop. |
 | 14 | **Print/set parameters.** Send e.g. `kp 0.004`, `kd 0.01`, `bias 0.5`, `axis 180`, `wsign -1`, `gsign 1`, then `done`. |
+| 15 | **Attitude determination check** (wheel off). Light off → 8 light spots every 45° → gyro still → turn KestrelSAT ~90° by hand. PASS/FAIL per step (±15°). Logs `ADCheck_dataNNN.csv`; plot with `python analysis/plot_adcheck.py`. Run 10 first if the sun sensor wiring changed. |
+| 16 | **Phototransistor resistor sweep.** Send a resistor value (`4700`, `10k`), then light off + light on each face. Repeat per resistor, then `done`. Logs `PTSweep_dataNNN.csv`; plot with `python analysis/plot_ptsweep.py`, which picks the resistor with the most signal and no saturation. Keep the light at the same distance every time. |
 | 0 | Stop the reaction wheel (unchanged). |
 
 **RGB LED during command 13:** yellow = hold still, blue = let go, orange = slewing, green = within ±10°, red = sun lost (wheel stopped).
