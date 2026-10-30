@@ -1,0 +1,5 @@
+.venv/
+build/
+dist/
+KestrelSAT.icns
+__pycache__/
