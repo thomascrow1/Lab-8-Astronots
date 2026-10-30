@@ -1,0 +1,8 @@
+#!/bin/sh
+'''exec' "/Users/thomascrow/Desktop/1. USAFA/1. F26/AS331 - Space Systems Engineering/Lab 8 Astronots/4. GCS MACOS/.venv/bin/python3.11" "$0" "$@"
+' '''
+import sys
+from PyQt5.pylupdate_main import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>KestrelSAT GCS</string>
+	<key>CFBundleExecutable</key>
+	<string>KestrelSAT GCS</string>
+	<key>CFBundleIconFile</key>
+	<string>KestrelSAT.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>edu.usafa.astro331.kestrelsat-gcs</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>KestrelSAT GCS</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>3.2.0</string>
+	<key>LSAppNapIsDisabled</key>
+	<true/>
+	<key>NSAppSleepDisabled</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
