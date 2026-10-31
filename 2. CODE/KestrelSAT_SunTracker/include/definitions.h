@@ -43,7 +43,7 @@
 #define DEFAULT_KD              0.1092  // N*m per rad/s of body rate
 #define DEFAULT_MAX_RATE_DPS    90.0    // slew rate cap: big turns run at <= this speed, then ease in
 #define DEFAULT_BIAS_PWM        0.0     // wheel starts at 0 RPM: full -400..+400 RPM range available both ways
-#define POINTING_DEADBAND_DEG   3.0     // inside this error, only rate damping is applied
+#define POINTING_DEADBAND_DEG   1.0     // inside this error, only rate damping is applied (was 3.0: it ate most of the lobe, SunTrack_data015)
 
 // 180 deg direction latch (SunTrack_data008: at 180 deg, sensor noise flipped the error sign every
 // other sample, so the push reversed ~10 times/s and KestrelSAT never turned toward the light):
@@ -66,12 +66,12 @@
 // because the gyro bias measured by hand was off). While tracking, aim LOBE_AMP_DEG to one side, then the
 // other; whichever side is brighter is where the sun is, so nudge the sun heading that way. Keeps drift
 // (gyro bias, slowly moving light) corrected without a full rescan.
-#define LOBE_AMP_DEG            4.0     // aim this far each side of the sun heading
-#define LOBE_DWELL_MS           2500    // time on each side
+#define LOBE_AMP_DEG            3.0     // aim this far each side of the sun heading
+#define LOBE_DWELL_MS           2000    // time on each side
 #define LOBE_AVG_MS             1000    // brightness is averaged over the last part of each side (after settling)
 #define LOBE_SETTLED_DEG        3.5     // only average while within this of the aim point...
 #define LOBE_SETTLED_DPS        5.0     // ...and turning slower than this
-#define LOBE_GAIN               0.5     // fraction of the estimated offset corrected each cycle
+#define LOBE_GAIN               0.7     // fraction of the estimated offset corrected each cycle
 #define LOBE_MAX_STEP_DEG       5.0     // largest correction per cycle
 #define LOBE_HALF_POWER_DEG     33.0    // -X sensor half-power angle (estimated from SunTrack_data008)
 
@@ -85,6 +85,12 @@
 // Sign conventions (verify with command 12, can be changed at runtime with command 14):
 #define DEFAULT_WHEEL_PWM_SIGN  1       // measured 13 Oct (SunTrack_data020): -1 drove KestrelSAT away from the light
 #define DEFAULT_GYRO_SIGN       1       // +1 if gyrZ() is positive for +Z (counter-clockwise from above) rotation
+
+// Sun sensor sampling: the lamp flickers at 120 Hz (8.33 ms), which made back-to-back reads jump
+// +/-300 counts sample to sample (SunTrack_data015, same with the wheel off). Spreading the reads evenly
+// over one full flicker period averages the flicker out.
+#define SUN_READS_PER_SAMPLE    16      // ADC reads per channel per sample
+#define SUN_READ_SPAN_US        8333    // spread them over one 120 Hz flicker period
 
 // Sun detection:
 #define SUN_LOST_THRESHOLD      0.15    // sum of calibrated channels below this = no sun

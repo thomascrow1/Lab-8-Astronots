@@ -35,7 +35,7 @@ DEFAULT_KP = 0.126
 DEFAULT_KD = 0.1092
 DEFAULT_MAX_RATE_DPS = 90.0
 DEFAULT_BIAS_PWM = 0.0
-POINTING_DEADBAND_DEG = 3.0
+POINTING_DEADBAND_DEG = 1.0
 LATCH_ENTER_DEG = 150.0
 LATCH_EXIT_DEG = 120.0
 LATCH_EXIT_TIME_MS = 300
@@ -47,12 +47,12 @@ REACQ_FRACTION = 0.3
 REACQ_TIME_MS = 1000
 REACQ_ON_TARGET_DEG = 10.0
 SCAN_MAX_SAMPLES = 600
-LOBE_AMP_DEG = 4.0
-LOBE_DWELL_MS = 2500
+LOBE_AMP_DEG = 3.0
+LOBE_DWELL_MS = 2000
 LOBE_AVG_MS = 1000
 LOBE_SETTLED_DEG = 3.5
 LOBE_SETTLED_DPS = 5.0
-LOBE_GAIN = 0.5
+LOBE_GAIN = 0.7
 LOBE_MAX_STEP_DEG = 5.0
 LOBE_HALF_POWER_DEG = 33.0
 TRACK_DURATION_MS = 120000
@@ -244,7 +244,7 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
              sun_start_deg=90.0, sun_rate_dps=0.0, duration_s=60.0,
              motor_tau_s=MOTOR_TAU_S, string_k=0.0, gyro_noise_dps=0.1, sun_noise=0.01,
              sun_off_at_s=None, half_power_deg=50.0, mx_spike_prob=0.0, use_latch=True,
-             adc_floor=0.0, gyro_bias_dps=0.0, use_scan=True, use_lobe=True, gyro_drift_dps=0.0, seed=1):
+             adc_floor=0.0, gyro_bias_dps=0.0, use_scan=True, use_lobe=True, gyro_drift_dps=0.0, deadband_deg=POINTING_DEADBAND_DEG, seed=1):
     """
     sun_start_deg : sun azimuth in the body frame at release (0 = +X; array is at 180)
     sun_rate_dps  : light source moving around KestrelSAT (deg/s, inertial)
@@ -258,6 +258,7 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     use_scan      : True = scan-and-hold (current firmware), False = old sun-sensor PD
     use_lobe      : sequential lobing while tracking (current firmware)
     gyro_drift_dps: extra gyro bias that appears after release (the held bias estimate misses it)
+    deadband_deg  : PD deadband (POINTING_DEADBAND_DEG in firmware)
     """
     rng = np.random.default_rng(seed)
     dt = 0.001
@@ -340,7 +341,7 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
                 err_aim = wrap180(sun_heading + aim_offset - heading)
                 err_ctrl = latch_far_error(err_aim, DT_CONTROL, latch) if use_latch else err_aim
                 tau, w_cmd, saturated = tracker_step(err_ctrl, rate_meas, DT_CONTROL, kp, kd,
-                                                     POINTING_DEADBAND_DEG, w_cmd)
+                                                     deadband_deg, w_cmd)
                 if abs(err_gyro) < REACQ_ON_TARGET_DEG and norm[2] < REACQ_FRACTION * sun_peak:
                     dim_since = t_ms if dim_since is None else dim_since
                     if t_ms - dim_since > REACQ_TIME_MS:
@@ -359,7 +360,7 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
             sun_lost_since = None
             err_ctrl = latch_far_error(err, DT_CONTROL, latch) if use_latch else err
             tau, w_cmd, saturated = tracker_step(err_ctrl, rate_meas, DT_CONTROL, kp, kd,
-                                                 POINTING_DEADBAND_DEG, w_cmd)
+                                                 deadband_deg, w_cmd)
 
         for key, val in zip(log.keys(), [t, mode, sun_dir, err, math.degrees(omega_b), w_cmd, w_wheel, tau,
                                          saturated, true_err]):

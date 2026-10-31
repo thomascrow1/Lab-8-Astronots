@@ -192,3 +192,20 @@ One entry per agent session. Record what the agent made, what we changed, and ho
 **We must verify on hardware:**
 - [ ] Run 13 for 2 min: `aim` alternates ±4, `sunHdg` changes slowly, and `bX` stays near the scan peak (no slow fade like 014)
 - [ ] If it wobbles too much, try a smaller `LOBE_AMP_DEG` (3) or a longer `LOBE_DWELL_MS`
+
+## 2026-10-30: Toward ±5° pointing (after SunTrack_data015)
+
+**Found in SunTrack_data015 (best run yet):** two things limited the fine pointing.
+1. Lamp flicker: −X raw jumped ±300 counts sample to sample in an alternating pattern (e.g. 2677, 1932, 2747, 1864), the same with the wheel stopped (sd 316) as running (sd 281), so it is not motor noise. The 5 ADC reads per sample were back-to-back (~0.25 ms), so each caught a random point of the 120 Hz flicker. Lobe estimates were noisy and `sunHdg` wandered 167.7°–180.1°.
+2. Deadband ate the lobe: in every lobe the heading stopped ~3.5° short of the ±4° aim point (inside the 3° deadband), so the real swing was ~±1° and the brightness difference ~¼ of what `lobe_step` assumes.
+Also: the `error(deg)` column reads ~0° the whole run (only −X lit), so the true accuracy has to come from the video.
+**Changed:**
+- `main.cpp` `read_sun_raw()`: 16 reads per channel spread evenly over 8.333 ms (one flicker period) with `micros()`; ~8.3 ms per call, inside the 20 ms loop. Affects every command that reads the sun sensors (they get slower by ~8 ms per sample).
+- `definitions.h`: `SUN_READS_PER_SAMPLE` 16, `SUN_READ_SPAN_US` 8333; `POINTING_DEADBAND_DEG` 3 → 1; `LOBE_AMP_DEG` 4 → 3; `LOBE_DWELL_MS` 2500 → 2000; `LOBE_GAIN` 0.5 → 0.7.
+- `sim/sun_tracker_sim.py`: same constants; `simulate()` takes `deadband_deg`.
+**Agent verified (no hardware):** PlatformIO build succeeds. Sim, true error after 30–40 s, 6 seeds of `drift` (0.25°/s gyro error, sensor noise 0.03): within ±5° 46% → 93–95%, max 8.3° → ~6–7.6°. With hardware-level noise (0.13, i.e. if the flicker fix doesn't work) the new tuning still beats the old one (68% vs 47% within ±5°). Fixed-light scenarios still settle in 11–13 s (step180hw 17.6 s, same as before); `hold` max 3.4°.
+**We must verify on hardware:**
+- [ ] Command 11 with the lamp on −X: the −X count should now change by tens, not hundreds, between lines
+- [ ] Command 13: CSV `mcu time(ms)` should still step by 20 ms (the loop isn't overrunning)
+- [ ] Command 13 for 2 min with video: within ±5°? `aim` alternates ±3 and the heading actually reaches each aim point (`err_ctrl` swings through 0)
+- [ ] If it chatters near the sun (wheel stall at ~45–50 RPM), raise `db` to 1.5 at runtime (command 14)

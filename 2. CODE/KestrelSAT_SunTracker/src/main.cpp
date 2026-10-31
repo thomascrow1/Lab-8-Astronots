@@ -1321,6 +1321,8 @@ void print_both(const String &msg) {
 
 /**
  * @brief Read all four sun sensor channels (averaged), order +X, +Y, -X, -Y.
+ *        The SUN_READS_PER_SAMPLE reads are spread evenly over SUN_READ_SPAN_US (one lamp flicker
+ *        period) so the 120 Hz flicker averages out. Takes ~8.3 ms; fits inside the 20 ms control loop.
  *        Also updates the sun_plusX/... globals used by the older tests.
  */
 void read_sun_raw(float raw[4]) {
@@ -1328,16 +1330,19 @@ void read_sun_raw(float raw[4]) {
   sun_minusX = 0.0;
   sun_plusY = 0.0;
   sun_minusY = 0.0;
-  for (int i = 0; i < n_sun_sensor_reads; i++) {
+  const uint32_t spacing_us = SUN_READ_SPAN_US / SUN_READS_PER_SAMPLE;
+  uint32_t t_start = micros();
+  for (int i = 0; i < SUN_READS_PER_SAMPLE; i++) {
+    while (micros() - t_start < i * spacing_us) {}  // wait for this read's slot in the flicker period
     sun_plusX += analogRead(SUN_SENSOR_PLUS_X_PIN);
     sun_minusX += analogRead(SUN_SENSOR_MINUS_X_PIN);
     sun_plusY += analogRead(SUN_SENSOR_PLUS_Y_PIN);
     sun_minusY += analogRead(SUN_SENSOR_MINUS_Y_PIN);
   }
-  sun_plusX /= n_sun_sensor_reads;
-  sun_minusX /= n_sun_sensor_reads;
-  sun_plusY /= n_sun_sensor_reads;
-  sun_minusY /= n_sun_sensor_reads;
+  sun_plusX /= SUN_READS_PER_SAMPLE;
+  sun_minusX /= SUN_READS_PER_SAMPLE;
+  sun_plusY /= SUN_READS_PER_SAMPLE;
+  sun_minusY /= SUN_READS_PER_SAMPLE;
 
   raw[SUN_PX] = sun_plusX;
   raw[SUN_PY] = sun_plusY;
