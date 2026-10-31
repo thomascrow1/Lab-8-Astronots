@@ -43,10 +43,18 @@ SCAN_RATE_DPS = 45.0
 SCAN_TURN_DEG = 420.0
 SCAN_TIMEOUT_MS = 30000
 SCAN_PEAK_FRACTION = 0.8
-REACQ_FRACTION = 0.5
+REACQ_FRACTION = 0.3
 REACQ_TIME_MS = 1000
 REACQ_ON_TARGET_DEG = 10.0
 SCAN_MAX_SAMPLES = 600
+LOBE_AMP_DEG = 4.0
+LOBE_DWELL_MS = 2500
+LOBE_AVG_MS = 1000
+LOBE_SETTLED_DEG = 3.5
+LOBE_SETTLED_DPS = 5.0
+LOBE_GAIN = 0.5
+LOBE_MAX_STEP_DEG = 5.0
+LOBE_HALF_POWER_DEG = 33.0
 TRACK_DURATION_MS = 120000
 WHEEL_MIN_RPM = -400.0
 WHEEL_MAX_RPM = 400.0
@@ -102,6 +110,33 @@ def latch_far_error(error_deg, dt_s, latch, enter_deg=LATCH_ENTER_DEG, exit_deg=
     if latch["dir"] < 0 and error_deg > 0:
         return error_deg - 360.0
     return error_deg
+
+
+def lobe_reset():
+    return {"side": 1, "t_side_s": 0.0, "sum": 0.0, "n": 0, "b_plus": 0.0, "last_step_deg": 0.0}
+
+
+def lobe_step(lobe, brightness, settled, dt_s, sun_heading_deg, amp_deg=LOBE_AMP_DEG,
+              dwell_s=LOBE_DWELL_MS / 1000.0, avg_s=LOBE_AVG_MS / 1000.0, gain=LOBE_GAIN,
+              max_step_deg=LOBE_MAX_STEP_DEG, half_power_deg=LOBE_HALF_POWER_DEG):
+    """Same as lobe_step() in sun_tracker.cpp. Returns (aim_offset_deg, sun_heading_deg)."""
+    lobe["t_side_s"] += dt_s
+    if lobe["t_side_s"] >= dwell_s - avg_s and settled:
+        lobe["sum"] += brightness
+        lobe["n"] += 1
+    if lobe["t_side_s"] >= dwell_s and lobe["n"] >= 5:
+        avg = max(lobe["sum"] / lobe["n"], 0.01)
+        if lobe["side"] > 0:
+            lobe["b_plus"] = avg
+        else:
+            p = math.log(0.5) / math.log(math.cos(math.radians(half_power_deg)))
+            offset_deg = math.degrees((math.log(lobe["b_plus"]) - math.log(avg)) / (2.0 * p * math.radians(amp_deg)))
+            step = max(-max_step_deg, min(max_step_deg, gain * offset_deg))
+            sun_heading_deg += step
+            lobe["last_step_deg"] = step
+        lobe["side"] = -lobe["side"]
+        lobe["t_side_s"], lobe["sum"], lobe["n"] = 0.0, 0.0, 0
+    return lobe["side"] * amp_deg, sun_heading_deg
 
 
 def tracker_step(error_deg, body_rate_dps, dt_s, kp, kd, deadband_deg, w_cmd_rpm,
@@ -209,7 +244,7 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
              sun_start_deg=90.0, sun_rate_dps=0.0, duration_s=60.0,
              motor_tau_s=MOTOR_TAU_S, string_k=0.0, gyro_noise_dps=0.1, sun_noise=0.01,
              sun_off_at_s=None, half_power_deg=50.0, mx_spike_prob=0.0, use_latch=True,
-             adc_floor=0.0, gyro_bias_dps=0.0, use_scan=True, seed=1):
+             adc_floor=0.0, gyro_bias_dps=0.0, use_scan=True, use_lobe=True, gyro_drift_dps=0.0, seed=1):
     """
     sun_start_deg : sun azimuth in the body frame at release (0 = +X; array is at 180)
     sun_rate_dps  : light source moving around KestrelSAT (deg/s, inertial)
@@ -221,6 +256,8 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     adc_floor     : calibrated readings below this read 0 (ESP32 ADC dead zone)
     gyro_bias_dps : constant gyro bias (removed by the bias measured while held)
     use_scan      : True = scan-and-hold (current firmware), False = old sun-sensor PD
+    use_lobe      : sequential lobing while tracking (current firmware)
+    gyro_drift_dps: extra gyro bias that appears after release (the held bias estimate misses it)
     """
     rng = np.random.default_rng(seed)
     dt = 0.001
@@ -240,6 +277,7 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     bias_sum, bias_n, gyro_bias, heading = 0.0, 0, 0.0, 0.0
     control_started, acquiring = False, False
     sun_heading, sun_peak, scan, scan_t0, dim_since = 0.0, 0.0, None, 0.0, None
+    lobe, aim_offset = lobe_reset(), 0.0
 
     log = {k: [] for k in ["t", "mode", "sun_dir", "err", "rate", "w_cmd", "w_meas", "tau", "sat", "true_err"]}
     t = 0.0
@@ -256,6 +294,8 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
         err = wrap180(sun_dir - SOLAR_ARRAY_AXIS_DEG)
         true_err = wrap180(sun_inertial - theta - SOLAR_ARRAY_AXIS_DEG)
         rate_meas = math.degrees(omega_b) + gyro_bias_dps + rng.normal(0.0, gyro_noise_dps)
+        if t_ms >= TRACK_RELEASE_MS:
+            rate_meas += gyro_drift_dps
         if control_started:
             heading += (rate_meas - gyro_bias) * DT_CONTROL
 
@@ -289,10 +329,16 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
                     else:
                         acquiring, dim_since = False, None
                         latch = {"dir": 0, "below_s": 0.0}
+                        lobe, aim_offset = lobe_reset(), 0.0
             else:
                 mode = "TRACK"
                 err_gyro = wrap180(sun_heading - heading)
-                err_ctrl = latch_far_error(err_gyro, DT_CONTROL, latch) if use_latch else err_gyro
+                if use_lobe:
+                    err_aim = wrap180(sun_heading + aim_offset - heading)
+                    settled = abs(err_aim) < LOBE_SETTLED_DEG and abs(rate_meas) < LOBE_SETTLED_DPS
+                    aim_offset, sun_heading = lobe_step(lobe, norm[2], settled, DT_CONTROL, sun_heading)
+                err_aim = wrap180(sun_heading + aim_offset - heading)
+                err_ctrl = latch_far_error(err_aim, DT_CONTROL, latch) if use_latch else err_aim
                 tau, w_cmd, saturated = tracker_step(err_ctrl, rate_meas, DT_CONTROL, kp, kd,
                                                      POINTING_DEADBAND_DEG, w_cmd)
                 if abs(err_gyro) < REACQ_ON_TARGET_DEG and norm[2] < REACQ_FRACTION * sun_peak:
@@ -361,6 +407,9 @@ SCENARIOS = {
                       description="180 deg + narrow sensors + -X motor noise (like SunTrack_data008)"),
     "hwoffset": dict(sun_start_deg=150.0, string_k=0.0005, half_power_deg=33.0, adc_floor=0.08,
                      gyro_bias_dps=0.05, description="Only -X lit near target + string twist (SunTrack_data011)"),
+    "drift":    dict(sun_start_deg=150.0, half_power_deg=33.0, adc_floor=0.08, sun_noise=0.03,
+                     gyro_drift_dps=0.25, duration_s=120.0,
+                     description="Gyro bias off by 0.25 deg/s after release (SunTrack_data014)"),
     "hold":     dict(sun_start_deg=175.0, duration_s=80.0, description="R2: hold on target 60 s"),
     "moving":   dict(sun_start_deg=150.0, sun_rate_dps=5.0, description="Stretch: light moving 5 deg/s"),
     "string":   dict(sun_start_deg=90.0, string_k=0.0005, description="R1 with string torsion"),

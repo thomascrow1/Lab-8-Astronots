@@ -180,3 +180,15 @@ One entry per agent session. Record what the agent made, what we changed, and ho
 - [ ] Command 13: LED purple, KestrelSAT turns one full circle, prints "Sun found at heading …", then turns back and holds; check by eye/video that −X faces the lamp
 - [ ] Watch the wheel speed during a long hold (string twist)
 - [ ] Block the lamp for >1 s: it should print "Rescanning" and spin again
+
+## 2026-10-30: Sequential lobing so tracking corrects drift without rescanning
+
+**Found in SunTrack_data014:** the scan worked (sun heading 186°) and the gyro heading held at 546–550° for 100 s, but −X fell from 1.20 to ~0.55: the array actually drifted ~20–30° because the gyro bias (−0.272°/s) was measured by hand. Also, `n-X` is capped at 1.2 in `compute_sun()`, which flattened the top of the brightness peak.
+**Changed:**
+- `sun_tracker.cpp/.h`: `LobeState`, `lobe_reset()`, `lobe_step()`. While tracking, aim +4° then −4° (2.5 s each), average −X brightness over the last 1 s of each side (only while within 3.5° and < 5°/s), and move the sun heading by 0.5 × the estimated offset (max 5° per cycle). Offset estimate for a cos^p sensor: ln(b+) − ln(b−) = 2·p·amp·offset.
+- `main.cpp`: the scan and lobing use uncapped −X brightness (`mx_bright`); the PD aims at sun heading + lobe offset; rescan only below 30% of the peak. SD log adds `aim_offset(deg)`, `mx_bright`; telemetry adds `aim`, `bX`.
+- `definitions.h`: `LOBE_*`; `REACQ_FRACTION` 0.5 → 0.3. Sim mirrored, plus `gyro_drift_dps` and scenario `drift`.
+**Agent verified (no hardware):** PlatformIO build succeeds; the C++ and Python lobe_step match exactly on 4000 random samples with a 1/16 s step (with 0.05 s steps, float vs double rounding can move one boundary sample into the next averaging window). Sim true error with a 0.25°/s gyro error: max 24° → 8° (100% within ±10°); other fixed-light scenarios stay within 1–5°. A 5°/s moving light still fails (lobing follows ≤ ~1°/s).
+**We must verify on hardware:**
+- [ ] Run 13 for 2 min: `aim` alternates ±4, `sunHdg` changes slowly, and `bX` stays near the scan peak (no slow fade like 014)
+- [ ] If it wobbles too much, try a smaller `LOBE_AMP_DEG` (3) or a longer `LOBE_DWELL_MS`

@@ -56,6 +56,55 @@ float pointing_error_deg(float sun_direction_deg, float array_axis_deg) {
   return wrap180(sun_direction_deg - array_axis_deg);
 }
 
+void lobe_reset(LobeState &lobe) {
+  lobe.side = 1;
+  lobe.t_side_s = 0.0f;
+  lobe.sum = 0.0f;
+  lobe.n = 0;
+  lobe.b_plus = 0.0f;
+  lobe.last_step_deg = 0.0f;
+}
+
+/**
+ * @brief Sequential lobing step (see sun_tracker.h).
+ *
+ * Example: aiming +4 deg reads 1.10, aiming -4 deg reads 0.90 -> the sun is on the + side,
+ * so the sun heading moves a few degrees +.
+ */
+float lobe_step(LobeState &lobe, float brightness, bool settled, float dt_s,
+                float amp_deg, float dwell_s, float avg_s, float gain, float max_step_deg,
+                float half_power_deg, float &sun_heading_deg) {
+  lobe.t_side_s += dt_s;
+  if (lobe.t_side_s >= dwell_s - avg_s && settled) {
+    lobe.sum += brightness;
+    lobe.n++;
+  }
+
+  // Switch sides once the dwell is over and we have enough settled samples (otherwise keep waiting).
+  if (lobe.t_side_s >= dwell_s && lobe.n >= 5) {
+    float avg = lobe.sum / lobe.n;
+    if (avg < 0.01f) avg = 0.01f;  // keep the log below finite
+    if (lobe.side > 0) {
+      lobe.b_plus = avg;
+    } else {
+      // Completed a +/- pair: estimate the sun's offset from the sun heading.
+      float p = logf(0.5f) / logf(cosf(half_power_deg / DEG_PER_RAD));
+      float amp_rad = amp_deg / DEG_PER_RAD;
+      float offset_deg = (logf(lobe.b_plus) - logf(avg)) / (2.0f * p * amp_rad) * DEG_PER_RAD;
+      float step = gain * offset_deg;
+      if (step >  max_step_deg) step =  max_step_deg;
+      if (step < -max_step_deg) step = -max_step_deg;
+      sun_heading_deg += step;
+      lobe.last_step_deg = step;
+    }
+    lobe.side = -lobe.side;
+    lobe.t_side_s = 0.0f;
+    lobe.sum = 0.0f;
+    lobe.n = 0;
+  }
+  return lobe.side * amp_deg;
+}
+
 /**
  * @brief 180 deg direction latch (see sun_tracker.h).
  *

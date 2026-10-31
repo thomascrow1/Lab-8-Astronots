@@ -1615,7 +1615,9 @@ void sun_sign_check() {
  *  - after TRACK_CONTROL_MS    : ACQUIRE - turn one full circle at SCAN_RATE_DPS, find the heading where
  *                                          -X is brightest (LED purple)
  *                                TRACK   - hold that heading with the gyro (PD), LED green within 10 deg,
- *                                          orange outside. If -X gets dim while pointed there -> ACQUIRE again
+ *                                          orange outside. Sequential lobing (aim +/-LOBE_AMP_DEG, compare
+ *                                          -X brightness) keeps nudging the sun heading to correct drift.
+ *                                          If -X gets very dim while pointed there -> ACQUIRE again
  *  - no sun found in a scan    : wheel stopped, warning sent, test ends
  *  - TRACK_DURATION_MS or 'X'  : wheel stopped, test ends
  * The gyro bias is measured while KestrelSAT is held (SPINUP/HOLD) and removed from the heading.
@@ -1627,7 +1629,7 @@ void sun_track() {
     dataFile.println("mcu time(ms),mode,sun_plusX(count),sun_plusY(count),sun_minusX(count),sun_minusY(count),"
                      "sun_mag,sun_direction(deg),error(deg),body_rate(deg/s),mag_X(uT),mag_Y(uT),"
                      "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated,err_ctrl(deg),latch,"
-                     "heading(deg),sun_heading(deg)");
+                     "heading(deg),sun_heading(deg),aim_offset(deg),mx_bright");
     dataFile.flush();
     dataFile.getName(file_name, sizeof(file_name));
     print_both(String("[INFO] Data file created successfully: ") + file_name);
@@ -1662,6 +1664,9 @@ void sun_track() {
   float sun_peak = 0.0;            // that brightness (calibrated -X)
   uint32_t scan_t0 = 0;
   uint32_t dim_since = 0;
+  LobeState lobe;                  // sequential lobing (fine pointing)
+  lobe_reset(lobe);
+  float aim_offset = 0.0;          // lobing aim offset from the sun heading (deg)
   bool saturated = false;
   uint32_t saturated_since = 0;
   uint32_t last_saturation_warning = 0;
@@ -1697,6 +1702,9 @@ void sun_track() {
     float rate = read_body_rate_dps();
     float w_meas = measure_wheel_rpm();
     if (control_started) heading += (rate - gyro_bias) * dt_s;
+    // -X brightness WITHOUT the 1.2 cap in compute_sun(), so the top of the brightness peak isn't flattened
+    float mx_bright = (raw[SUN_MX] - sun_cal.dark[SUN_MX]) / (sun_cal.bright[SUN_MX] - sun_cal.dark[SUN_MX]);
+    if (mx_bright < 0.0) mx_bright = 0.0;
 
     // Decide & control:
     const char *mode;
@@ -1729,7 +1737,7 @@ void sun_track() {
         mode = "ACQUIRE";
         neopixelWrite(RGB_BUILTIN, 128, 0, 128); // purple: scanning
         tau = rate_step(SCAN_RATE_DPS, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
-        bool done = scan_add(sun_scan, heading, sun.norm[SUN_MX], SCAN_TURN_DEG);
+        bool done = scan_add(sun_scan, heading, mx_bright, SCAN_TURN_DEG);
         if (done || now - scan_t0 > SCAN_TIMEOUT_MS) {
           if (!scan_result(sun_scan, SCAN_PEAK_FRACTION, SUN_LOST_THRESHOLD, sun_heading, sun_peak)) {
             driver.setOutput(0);
@@ -1743,25 +1751,32 @@ void sun_track() {
           acquiring = false;
           dim_since = 0;
           latch = {0, 0.0};
+          lobe_reset(lobe);
+          aim_offset = 0.0;
           print_both(String("[INFO] Sun found at heading ") + String(sun_heading, 1) + " deg (peak -X " +
                      String(sun_peak, 2) + "). Tracking with the gyro.");
         }
       } else {
         mode = "TRACK";
-        float err_gyro = wrap180(sun_heading - heading);
-        err_ctrl = latch_far_error(err_gyro, dt_s, LATCH_ENTER_DEG, LATCH_EXIT_DEG, LATCH_EXIT_TIME_MS / 1000.0, latch);
+        float err_gyro = wrap180(sun_heading - heading);           // how far the array is from the sun heading
+        float err_aim = wrap180(sun_heading + aim_offset - heading); // how far from this lobe's aim point
+        bool settled = fabs(err_aim) < LOBE_SETTLED_DEG && fabs(rate) < LOBE_SETTLED_DPS;
+        aim_offset = lobe_step(lobe, mx_bright, settled, dt_s, LOBE_AMP_DEG, LOBE_DWELL_MS / 1000.0,
+                               LOBE_AVG_MS / 1000.0, LOBE_GAIN, LOBE_MAX_STEP_DEG, LOBE_HALF_POWER_DEG, sun_heading);
+        err_aim = wrap180(sun_heading + aim_offset - heading);
+        err_ctrl = latch_far_error(err_aim, dt_s, LATCH_ENTER_DEG, LATCH_EXIT_DEG, LATCH_EXIT_TIME_MS / 1000.0, latch);
         tau = tracker_step(err_ctrl, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
         if (fabs(err_gyro) <= 10.0) neopixelWrite(RGB_BUILTIN, 0, 255, 0);   // green: on target
         else                        neopixelWrite(RGB_BUILTIN, 255, 165, 0); // orange: slewing
 
         // Pointed at the sun's heading but -X is dim: the sun moved or the heading drifted -> rescan.
-        if (fabs(err_gyro) < REACQ_ON_TARGET_DEG && sun.norm[SUN_MX] < REACQ_FRACTION * sun_peak) {
+        if (fabs(err_gyro) < REACQ_ON_TARGET_DEG && mx_bright < REACQ_FRACTION * sun_peak) {
           if (dim_since == 0) dim_since = now;
           if (now - dim_since > REACQ_TIME_MS) {
             acquiring = true;
             scan_start(sun_scan, heading);
             scan_t0 = now;
-            print_both(String("[INFO] -X dimmed to ") + String(sun.norm[SUN_MX], 2) + " at t=" + t + " ms. Rescanning.");
+            print_both(String("[INFO] -X dimmed to ") + String(mx_bright, 2) + " at t=" + t + " ms. Rescanning.");
           }
         } else {
           dim_since = 0;
@@ -1802,11 +1817,14 @@ void sun_track() {
     dataFile.print(err_ctrl, 2);                  dataFile.print(",");
     dataFile.print(latch.dir);                    dataFile.print(",");
     dataFile.print(heading, 2);                   dataFile.print(",");
-    dataFile.println(sun_heading, 2);
+    dataFile.print(sun_heading, 2);               dataFile.print(",");
+    dataFile.print(aim_offset, 1);                dataFile.print(",");
+    dataFile.println(mx_bright, 3);
 
     // Telemetry (Name:value for GCS plotter): every point on USB, 2 Hz on XBee
     String s = "t:" + String(t) + ",err:" + String(err, 1) + ",latch:" + String(latch.dir) + ",hdg:" + String(heading, 1) +
-               ",sunHdg:" + String(sun_heading, 1) + ",acq:" + String(acquiring ? 1 : 0) + ",gZ:" + String(rate, 2) +
+               ",sunHdg:" + String(sun_heading, 1) + ",aim:" + String(aim_offset, 0) +
+               ",bX:" + String(mx_bright, 2) + ",acq:" + String(acquiring ? 1 : 0) + ",gZ:" + String(rate, 2) +
                ",wCmd:" + String(w_cmd_rpm, 0) + ",wMeas:" + String(w_meas, 0) +
                ",sDir:" + String(sun.direction_deg, 1) +
                // same sun sensor fields as command 11, so the GCS Sun Map works during tracking

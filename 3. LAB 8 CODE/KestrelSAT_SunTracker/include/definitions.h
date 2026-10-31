@@ -58,9 +58,22 @@
 #define SCAN_TURN_DEG           420.0   // full turn + 30 deg each side, so the peak's bright stretch is never cut off
 #define SCAN_TIMEOUT_MS         30000   // give up on a scan after this long (wheel can't turn the body?)
 #define SCAN_PEAK_FRACTION      0.8     // sun heading = centre of the samples >= 80% of the peak
-#define REACQ_FRACTION          0.5     // rescan if -X brightness < 50% of the scan peak...
+#define REACQ_FRACTION          0.3     // rescan (safety net) if -X brightness < 30% of the scan peak...
 #define REACQ_TIME_MS           1000    // ...for this long...
 #define REACQ_ON_TARGET_DEG     10.0    // ...while the gyro says we are pointed at the sun
+
+// Sequential lobing (30 Oct, SunTrack_data014: gyro heading held, but -X dimmed 1.20 -> 0.55 over 100 s
+// because the gyro bias measured by hand was off). While tracking, aim LOBE_AMP_DEG to one side, then the
+// other; whichever side is brighter is where the sun is, so nudge the sun heading that way. Keeps drift
+// (gyro bias, slowly moving light) corrected without a full rescan.
+#define LOBE_AMP_DEG            4.0     // aim this far each side of the sun heading
+#define LOBE_DWELL_MS           2500    // time on each side
+#define LOBE_AVG_MS             1000    // brightness is averaged over the last part of each side (after settling)
+#define LOBE_SETTLED_DEG        3.5     // only average while within this of the aim point...
+#define LOBE_SETTLED_DPS        5.0     // ...and turning slower than this
+#define LOBE_GAIN               0.5     // fraction of the estimated offset corrected each cycle
+#define LOBE_MAX_STEP_DEG       5.0     // largest correction per cycle
+#define LOBE_HALF_POWER_DEG     33.0    // -X sensor half-power angle (estimated from SunTrack_data008)
 
 // Wheel limits:
 #define WHEEL_MIN_RPM           -400.0  // wheel may spin both ways (crosses 0 RPM) for twice the range

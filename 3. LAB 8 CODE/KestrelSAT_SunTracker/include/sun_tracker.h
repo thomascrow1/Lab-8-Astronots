@@ -104,6 +104,28 @@ bool scan_add(SunScan &scan, float heading_deg, float brightness, float turn_deg
 bool scan_result(const SunScan &scan, float peak_fraction, float min_bright,
                  float &sun_heading_deg, float &peak);
 
+// ---- Sequential lobing (fine pointing while tracking) ----
+// Aim +amp, then -amp, from the sun heading. Average -X brightness at the end of each side
+// (only samples taken while settled). After each +/- pair, estimate how far the sun is from the
+// sun heading and move the sun heading part of the way there.
+// For a cos^p sensor: ln(b+) - ln(b-) = 2 * p * amp * offset (radians), p from the half-power angle.
+struct LobeState {
+  int side;          // +1 or -1: which side we are aiming at
+  float t_side_s;    // time spent on this side
+  float sum;         // brightness sum over the averaging window
+  int n;             // samples in that sum
+  float b_plus;      // average brightness on the + side (last cycle)
+  float last_step_deg;  // most recent correction (for logging)
+};
+
+void lobe_reset(LobeState &lobe);
+
+// One control step. brightness: uncapped -X brightness; settled: within LOBE_SETTLED_* of the aim point.
+// Updates sun_heading_deg after each +/- pair. Returns the aim offset (deg) to add to the sun heading.
+float lobe_step(LobeState &lobe, float brightness, bool settled, float dt_s,
+                float amp_deg, float dwell_s, float avg_s, float gain, float max_step_deg,
+                float half_power_deg, float &sun_heading_deg);
+
 // Wheel speed to send to the motor so the (laggy) wheel follows w_cmd_rpm.
 //   max_rpm : wheel speed at 100% PWM (RPM_PER_PWM)
 float motor_lag_comp(float w_cmd_rpm, float w_prev_cmd_rpm, float dt_s,
