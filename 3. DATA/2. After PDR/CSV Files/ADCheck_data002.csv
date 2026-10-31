@@ -1,0 +1,2 @@
+step,expected(deg),measured(deg),error(deg),sun_mag,sun_plusX(count),sun_plusY(count),sun_minusX(count),sun_minusY(count),result
+ROTATION,88.9,90.1,-1.2,0.659,13.0,1109.2,0.0,0.0,PASS
