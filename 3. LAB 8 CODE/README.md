@@ -85,6 +85,9 @@ Results with default gains (Kp = 0.0035, Kd = 0.0098, motor τ = 0.4 s):
 
 ## Known limitations and things to measure
 
+- **Starting with the sun exactly behind the array (180°).** Turning left and turning right are equally short, so sensor noise picked the sign of the error each sample and the push reversed ~10 times/s (SunTrack_data008). A direction latch (`latch_far_error()`, `LATCH_*` in `definitions.h`) now commits to one direction once |error| > 150° and releases below 120°. The SD log has `err_ctrl(deg)` (error after the latch) and `latch` (0, +1, −1).
+- **−X sensor noise with the wheel running.** In SunTrack_data008, −X jumped to 500–4095 counts while +X was lit, only once the wheel ran. Check the −X wiring and ground, keep sensor wires away from the motor leads, or add 0.1 µF from A2 to GND.
+
 - **Signs are unverified on hardware.** Lab 6/7 code hints at sign flips (`w_RW_cmd = −pwm…`). Command 12 exists for this.
 - **Wheel speed is open-loop PWM.** The outer PD loop corrects for it. The motor time constant in the sim (0.4 s) should be measured from Lab 7 Test A data.
 - **Stopping the wheel when the sun is lost** dumps the wheel's momentum into the body, so KestrelSAT will start spinning. This was the chosen behavior. A gentler option is to ramp the wheel down.

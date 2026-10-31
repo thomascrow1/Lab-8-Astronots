@@ -34,6 +34,11 @@ struct TrackerGains {
   float max_rate_dps;   // slew rate cap (deg/s): the controller never asks to turn faster than this
 };
 
+struct FarErrorLatch {
+  int dir;              // 0 = not latched, +1 / -1 = committed turn direction
+  float below_s;        // time |error| has been back below the exit threshold (s)
+};
+
 struct WheelLimits {
   float min_rpm;
   float max_rpm;
@@ -48,6 +53,14 @@ SunReading compute_sun(const float raw[4], const SunCalibration &cal);
 
 // Pointing error (deg): positive when the sun is counter-clockwise (+Z) of the array.
 float pointing_error_deg(float sun_direction_deg, float array_axis_deg);
+
+// 180 deg direction latch. Near 180 deg the sign of the error is set by sensor noise, so PD
+// pushes one way, then the other, and goes nowhere. Once |error| > enter_deg this commits to
+// one turn direction and, if noise flips the sign, returns the error measured the long way
+// round (e.g. -179 -> +181). Releases after |error| < exit_deg for exit_time_s.
+// Start each test with latch = {0, 0}.
+float latch_far_error(float error_deg, float dt_s, float enter_deg, float exit_deg,
+                      float exit_time_s, FarErrorLatch &latch);
 
 // One PD controller step.
 //   error_deg     : pointing error from pointing_error_deg()

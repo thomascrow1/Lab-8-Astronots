@@ -57,6 +57,35 @@ float pointing_error_deg(float sun_direction_deg, float array_axis_deg) {
 }
 
 /**
+ * @brief 180 deg direction latch (see sun_tracker.h).
+ *
+ * Example: latched +1, sensor noise makes the error read -179 -> returns +181, so the
+ * controller keeps turning the same way instead of reversing.
+ */
+float latch_far_error(float error_deg, float dt_s, float enter_deg, float exit_deg,
+                      float exit_time_s, FarErrorLatch &latch) {
+  if (latch.dir == 0) {
+    if (fabsf(error_deg) > enter_deg) {
+      latch.dir = (error_deg >= 0.0f) ? 1 : -1;  // whichever way it reads first
+      latch.below_s = 0.0f;
+    }
+    return error_deg;
+  }
+
+  if (fabsf(error_deg) < exit_deg) {
+    // Getting close: use the normal error. Release only if it stays close (not a 1-sample spike).
+    latch.below_s += dt_s;
+    if (latch.below_s >= exit_time_s) latch.dir = 0;
+    return error_deg;
+  }
+
+  latch.below_s = 0.0f;
+  if (latch.dir > 0 && error_deg < 0.0f) return error_deg + 360.0f;
+  if (latch.dir < 0 && error_deg > 0.0f) return error_deg - 360.0f;
+  return error_deg;
+}
+
+/**
  * @brief One step of the PD sun-pointing controller.
  *
  * 1. Desired body torque:  tau = Kp * error - Kd * body_rate

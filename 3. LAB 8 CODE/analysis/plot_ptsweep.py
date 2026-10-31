@@ -8,7 +8,8 @@ Usage:
   python plot_ptsweep.py PTSweep_data001.csv PTSweep_data002.csv --show   # combine sessions
   python plot_ptsweep.py PTSweep_data001.csv --sat-limit 3800
 
-Outputs <first file>.png and prints a table per resistor and channel:
+Outputs <first file>.png (3 detail panels), <first file>_best.png (one summary chart
+showing why the best resistor wins), and prints a table per resistor and channel:
   bright : counts with the light straight at that face
   dark   : counts with the light off
   span   : bright - dark  (the signal the sun sensor uses; bigger is better)
@@ -16,8 +17,10 @@ Outputs <first file>.png and prints a table per resistor and channel:
   I_photo: estimated phototransistor current = V / R  (should stay about the same
            for every R until the output saturates near 3.3 V)
 
-"Best" resistor = the biggest span on the WORST channel, with no channel above
---sat-limit counts (near the 4095 ADC limit the reading stops growing with light).
+"Best" resistor = the biggest span on the WORST channel, with every lit channel inside
+the ESP32 ADC's accurate range (150-2450 mV at 11 dB attenuation = ~190-3040 counts,
+per the Espressif ADC docs). Above that the reading bends over and stops tracking the
+light; at 4095 it is fully saturated (--sat-limit marks saturation on the detail plots).
 """
 
 import argparse
@@ -30,6 +33,8 @@ import numpy as np
 
 ADC_MAX = 4095.0
 V_REF = 3.3  # approximate: the ESP32 ADC is not perfectly linear near the top
+ADC_ACCURATE_MIN = 190.0   # ~150 mV: below this the ESP32 ADC reads 0
+ADC_ACCURATE_MAX = 3040.0  # ~2450 mV: above this the ESP32 ADC is nonlinear, then saturates
 CHANNELS = ["+X", "+Y", "-X", "-Y"]
 COLUMNS = ["plusX", "plusY", "minusX", "minusY"]
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]  # validated categorical palette
@@ -66,6 +71,73 @@ def fmt_ohm(r):
     return f"{r:g}"
 
 
+def summary_figure(R, bright, best_k):
+    """One chart: light-on reading of each face for every resistor, against the ADC's accurate
+    range. The best resistor is the one with the most signal while every face stays in range."""
+    x = np.arange(len(R))
+    fig, ax = plt.subplots(figsize=(11, 6.2), constrained_layout=True)
+
+    # Zones of the ADC (background)
+    ax.axhspan(ADC_ACCURATE_MIN, ADC_ACCURATE_MAX, color="#1baf7a", alpha=0.10, linewidth=0)
+    ax.axhspan(ADC_ACCURATE_MAX, ADC_MAX, color="#eda100", alpha=0.12, linewidth=0)
+    ax.axhline(ADC_MAX, color="#e34948", linewidth=1.5)
+    ax.text(-0.55, ADC_MAX + 40, "SATURATED (4095): brighter light reads the same", ha="left", va="bottom",
+            fontsize=9, color="#a32d2c")
+    ax.text(-0.55, ADC_ACCURATE_MAX + 80, "Nonlinear: reading no longer tracks the light", ha="left", va="bottom",
+            fontsize=9, color="#7a5300")
+    ax.text(-0.55, ADC_ACCURATE_MAX - 80, "ADC accurate range", ha="left", va="top",
+            fontsize=9, color="#0f6b4a")
+
+    # Highlight the best resistor
+    if best_k is not None:
+        ax.fill_between([best_k - 0.42, best_k + 0.42], -650, ADC_MAX, color="#2a78d6", alpha=0.10, linewidth=0)
+
+    # Each face as a marker, side by side
+    lo = np.nanmin(bright, axis=1)
+    hi = np.nanmax(bright, axis=1)
+    offsets = np.array([-0.18, -0.06, 0.06, 0.18])
+    for i, ch in enumerate(CHANNELS):
+        ax.scatter(x + offsets[i], bright[:, i], s=70, color=COLORS[i], marker=MARKERS[i],
+                   edgecolors="white", linewidths=1.2, zorder=3, label=f"{ch} face")
+
+    # Verdict under each resistor
+    for k in range(len(R)):
+        if np.nanmax(bright[k]) >= ADC_MAX - 10:
+            verdict, color = "saturated", "#a32d2c"
+        elif np.nanmax(bright[k]) > ADC_ACCURATE_MAX:
+            verdict, color = "partly\nnonlinear", "#7a5300"
+        elif k == best_k:
+            verdict, color = "BEST", "#1c5cab"
+        else:
+            verdict, color = "weaker\nsignal", "#52514e"
+        ax.text(k, -330, verdict, ha="center", va="top", fontsize=10, color=color,
+                fontweight="bold" if k == best_k else "normal")
+
+    if best_k is not None:
+        ax.annotate(f"{fmt_ohm(R[best_k])}: the most signal with all 4 faces\n"
+                    f"inside the accurate range ({lo[best_k]:.0f}-{hi[best_k]:.0f} counts)",
+                    xy=(best_k + 0.15, hi[best_k] + 80), xytext=(best_k - 1.9, ADC_ACCURATE_MAX + 560),
+                    fontsize=10, color="#0b0b0b",
+                    arrowprops=dict(arrowstyle="->", color="#0b0b0b", linewidth=1))
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{fmt_ohm(r)} Ω" for r in R], fontsize=11)
+    ax.set_xlim(-0.6, len(R) - 0.4)
+    ax.set_ylim(-700, ADC_MAX + 350)
+    ax.set_yticks(range(0, 4001, 500))
+    ax.set_ylabel("Reading with the light on the face (ADC counts)")
+    ax.set_xlabel("Phototransistor resistor")
+    ax.set_title("Why this resistor: biggest sun sensor signal that stays in the ADC's accurate range",
+                 loc="left", fontsize=13)
+    ax.grid(True, axis="y", color="#e6e6e3", linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "bottom", "left"):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(axis="x", length=0)
+    ax.legend(frameon=False, ncol=2, loc="center right", fontsize=10, title="Light on the...", title_fontsize=10)
+    return fig
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv", nargs="+", help="PTSweep_dataNNN.csv file(s) from the SD card")
@@ -97,20 +169,20 @@ def main():
     best_k = None
     for k in range(len(R)):
         lit = ~np.isnan(bright[k])
-        if not lit.any() or np.any(bright[k, lit] > args.sat_limit):
+        if not lit.any() or np.any(bright[k, lit] > ADC_ACCURATE_MAX):
             continue
         worst_span = np.nanmin(span[k])
         if best_k is None or worst_span > np.nanmin(span[best_k]):
             best_k = k
     print()
     if best_k is None:
-        print(f"No resistor kept every channel below {args.sat_limit:.0f} counts. Try smaller resistors "
+        print(f"No resistor kept every channel below {ADC_ACCURATE_MAX:.0f} counts. Try smaller resistors "
               "or move the light farther away.")
     else:
         print(f"BEST: {fmt_ohm(R[best_k])} ohm  (worst-channel span {np.nanmin(span[best_k]):.0f} counts, "
-              f"no channel above {args.sat_limit:.0f})")
+              f"every channel inside the ADC's accurate range, <= {ADC_ACCURATE_MAX:.0f})")
         for i, ch in enumerate(CHANNELS):
-            ok = [k for k in range(len(R)) if not np.isnan(bright[k, i]) and bright[k, i] <= args.sat_limit]
+            ok = [k for k in range(len(R)) if not np.isnan(bright[k, i]) and bright[k, i] <= ADC_ACCURATE_MAX]
             if ok:
                 kb = max(ok, key=lambda k: span[k, i])
                 print(f"  best for {ch} alone: {fmt_ohm(R[kb])} (span {span[kb, i]:.0f})")
@@ -176,6 +248,10 @@ def main():
     out = os.path.splitext(args.csv[0])[0] + ".png"
     fig.savefig(out, dpi=150)
     print(f"Saved {out}")
+
+    out_best = os.path.splitext(args.csv[0])[0] + "_best.png"
+    summary_figure(R, bright, best_k).savefig(out_best, dpi=150)
+    print(f"Saved {out_best}")
     if args.show:
         plt.show()
 

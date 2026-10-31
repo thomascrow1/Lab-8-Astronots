@@ -12,7 +12,7 @@
 
 #define SUN_SENSOR_PLUS_X_PIN   A0
 #define SUN_SENSOR_MINUS_X_PIN  A2
-#define SUN_SENSOR_PLUS_Y_PIN   A1
+#define SUN_SENSOR_PLUS_Y_PIN   A1   // briefly swapped with A3 on 30 Oct, reverted: command 15 step 4 showed the swap was wrong
 #define SUN_SENSOR_MINUS_Y_PIN  A3
 
 #define MOTOR_VOLTAGE           5.05
@@ -44,6 +44,12 @@
 #define DEFAULT_MAX_RATE_DPS    90.0    // slew rate cap: big turns run at <= this speed, then ease in
 #define DEFAULT_BIAS_PWM        0.0     // wheel starts at 0 RPM: full -400..+400 RPM range available both ways
 #define POINTING_DEADBAND_DEG   3.0     // inside this error, only rate damping is applied
+
+// 180 deg direction latch (SunTrack_data008: at 180 deg, sensor noise flipped the error sign every
+// other sample, so the push reversed ~10 times/s and KestrelSAT never turned toward the light):
+#define LATCH_ENTER_DEG         150.0   // |error| above this: commit to one turn direction
+#define LATCH_EXIT_DEG          120.0   // release once |error| stays below this...
+#define LATCH_EXIT_TIME_MS      300     // ...for this long (so a 1-2 sample sensor spike can't release it)
 
 // Wheel limits:
 #define WHEEL_MIN_RPM           -400.0  // wheel may spin both ways (crosses 0 RPM) for twice the range

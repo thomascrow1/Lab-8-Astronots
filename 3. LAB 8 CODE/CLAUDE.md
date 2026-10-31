@@ -12,7 +12,7 @@
 
 ## Hardware: SparkFun Thing Plus ESP32
 - XBee: HardwareSerial(2), 9600 baud. ICM-20948 IMU and MAX17048 gauge on I2C.
-- Sun sensor: A0 = +X, A1 = +Y, A2 = −X, A3 = −Y (3.3 V, 10 kΩ).
+- Sun sensor: A0 = +X, A1 = +Y, A2 = −X, A3 = −Y (3.3 V, 3.3 kΩ).
 - TB9051FTG motor driver PWM1 = 33, PWM2 = 15. Encoder A = 14, B = 32. Motor supply 5 V.
 - Pin map: `include/definitions.h`.
 

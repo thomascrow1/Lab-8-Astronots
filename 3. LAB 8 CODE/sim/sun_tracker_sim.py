@@ -36,6 +36,9 @@ DEFAULT_KD = 0.1092
 DEFAULT_MAX_RATE_DPS = 90.0
 DEFAULT_BIAS_PWM = 0.0
 POINTING_DEADBAND_DEG = 3.0
+LATCH_ENTER_DEG = 150.0
+LATCH_EXIT_DEG = 120.0
+LATCH_EXIT_TIME_MS = 300
 WHEEL_MIN_RPM = -400.0
 WHEEL_MAX_RPM = 400.0
 WHEEL_MAX_ACCEL_RPM_S = 400.0
@@ -69,6 +72,27 @@ def compute_sun(norm):
     if direction < 0:
         direction += 360.0
     return direction, magnitude
+
+
+def latch_far_error(error_deg, dt_s, latch, enter_deg=LATCH_ENTER_DEG, exit_deg=LATCH_EXIT_DEG,
+                    exit_time_s=LATCH_EXIT_TIME_MS / 1000.0):
+    """180 deg direction latch, same as sun_tracker.cpp. latch = {"dir": 0, "below_s": 0.0}."""
+    if latch["dir"] == 0:
+        if abs(error_deg) > enter_deg:
+            latch["dir"] = 1 if error_deg >= 0 else -1
+            latch["below_s"] = 0.0
+        return error_deg
+    if abs(error_deg) < exit_deg:
+        latch["below_s"] += dt_s
+        if latch["below_s"] >= exit_time_s:
+            latch["dir"] = 0
+        return error_deg
+    latch["below_s"] = 0.0
+    if latch["dir"] > 0 and error_deg < 0:
+        return error_deg + 360.0
+    if latch["dir"] < 0 and error_deg > 0:
+        return error_deg - 360.0
+    return error_deg
 
 
 def tracker_step(error_deg, body_rate_dps, dt_s, kp, kd, deadband_deg, w_cmd_rpm,
@@ -111,25 +135,31 @@ def phototransistor_response(angle_off_axis_deg, half_power_deg=50.0):
     return c ** p if c > 0 else 0.0
 
 
-def sun_sensor(sun_body_deg, rng, noise, intensity=1.0):
+def sun_sensor(sun_body_deg, rng, noise, intensity=1.0, half_power_deg=50.0, mx_spike_prob=0.0):
+    """mx_spike_prob: chance per sample that -X reads a false bright value (motor noise seen in
+    SunTrack_data008 once the wheel was running)."""
     norm = []
     for axis in SENSOR_AXES_DEG:
-        n = intensity * phototransistor_response(wrap180(sun_body_deg - axis))
+        n = intensity * phototransistor_response(wrap180(sun_body_deg - axis), half_power_deg)
         n += rng.normal(0.0, noise)
         norm.append(max(0.0, n))
+    if mx_spike_prob > 0 and rng.random() < mx_spike_prob:
+        norm[2] = rng.uniform(0.2, 1.2)
     return norm
 
 
 def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
              sun_start_deg=90.0, sun_rate_dps=0.0, duration_s=60.0,
              motor_tau_s=MOTOR_TAU_S, string_k=0.0, gyro_noise_dps=0.1, sun_noise=0.01,
-             sun_off_at_s=None, seed=1):
+             sun_off_at_s=None, half_power_deg=50.0, mx_spike_prob=0.0, use_latch=True, seed=1):
     """
     sun_start_deg : sun azimuth in the body frame at release (0 = +X; array is at 180)
     sun_rate_dps  : light source moving around KestrelSAT (deg/s, inertial)
     motor_tau_s   : wheel speed time constant (estimate from Lab 7 Test A data)
     string_k      : string torsion stiffness (N*m/rad), 0 = ignore
     sun_off_at_s  : turn the light off at this time to test sun-lost behaviour
+    half_power_deg: phototransistor half-power angle (~33 deg measured in SunTrack_data008)
+    mx_spike_prob : chance per sample of a false -X reading while the wheel runs
     """
     rng = np.random.default_rng(seed)
     dt = 0.001
@@ -145,6 +175,7 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     bias_rpm = bias_pwm * RPM_PER_PWM
     released = False
     w_prev_cmd = 0.0
+    latch = {"dir": 0, "below_s": 0.0}
 
     log = {k: [] for k in ["t", "mode", "sun_dir", "err", "rate", "w_cmd", "w_meas", "tau", "sat"]}
     t = 0.0
@@ -155,7 +186,8 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
         intensity = 0.0 if (sun_off_at_s is not None and t >= sun_off_at_s) else 1.0
 
         # ---- sense (body frame sun azimuth = inertial sun azimuth - body angle)
-        norm = sun_sensor(sun_inertial - theta, rng, sun_noise, intensity)
+        spikes = mx_spike_prob if t_ms >= TRACK_CONTROL_MS else 0.0
+        norm = sun_sensor(sun_inertial - theta, rng, sun_noise, intensity, half_power_deg, spikes)
         sun_dir, mag = compute_sun(norm)
         err = wrap180(sun_dir - SOLAR_ARRAY_AXIS_DEG)
         rate_meas = math.degrees(omega_b) + rng.normal(0.0, gyro_noise_dps)
@@ -179,7 +211,8 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
         else:
             mode = "TRACK"
             sun_lost_since = None
-            tau, w_cmd, saturated = tracker_step(err, rate_meas, DT_CONTROL, kp, kd,
+            err_ctrl = latch_far_error(err, DT_CONTROL, latch) if use_latch else err
+            tau, w_cmd, saturated = tracker_step(err_ctrl, rate_meas, DT_CONTROL, kp, kd,
                                                  POINTING_DEADBAND_DEG, w_cmd)
 
         for key, val in zip(log.keys(), [t, mode, sun_dir, err, math.degrees(omega_b), w_cmd, w_wheel, tau, saturated]):
@@ -222,6 +255,9 @@ def settling_time(log, band_deg=10.0):
 SCENARIOS = {
     "step90":   dict(sun_start_deg=90.0, description="R1: sun 90 deg from array"),
     "step170":  dict(sun_start_deg=10.0, description="Sun nearly behind the array (170 deg)"),
+    "step180":  dict(sun_start_deg=0.0, description="Sun exactly behind the array (180 deg)"),
+    "step180hw": dict(sun_start_deg=0.0, half_power_deg=33.0, sun_noise=0.02, mx_spike_prob=0.06,
+                      description="180 deg + narrow sensors + -X motor noise (like SunTrack_data008)"),
     "hold":     dict(sun_start_deg=175.0, duration_s=80.0, description="R2: hold on target 60 s"),
     "moving":   dict(sun_start_deg=150.0, sun_rate_dps=5.0, description="Stretch: light moving 5 deg/s"),
     "string":   dict(sun_start_deg=90.0, string_k=0.0005, description="R1 with string torsion"),

@@ -114,3 +114,54 @@ One entry per agent session. Record what the agent made, what we changed, and ho
 **We must verify on hardware:**
 - [ ] Run 10 (recalibrate after the rewire), then 15; all 8 spots and the hand turn should PASS
 - [ ] Run 16 with each resistor at a fixed light distance; plot it, install the best R, then rerun 10 and paste the new sun_cal line
+
+## 2026-10-30: 180° start never turned toward the light (SunTrack_data008) → direction latch
+
+**Found in SunTrack_data008:**
+- Started with the light on +X (error ±180°). The error stayed at |e| > 170° for 96% of tracking, and its sign flipped 487 times in 1036 samples (±Y noise of a few counts decided it). The torque command reversed 509 times and averaged −0.004 N·m, so the wheel chattered and KestrelSAT only wobbled −48°..+23°. In the first 0.9 s, the error held at +179° and the body did turn +20° the right way before a flip reversed it.
+- −X read 0 with the wheel off and jumped to 500–4095 counts (61 samples) once the wheel ran, while +X was lit: electrical noise, not light. Each spike made the error read ~0°.
+- ±Y stayed under ~200 counts even after a 50° turn off +X, so the sensor is nearly blind between faces.
+- `sun_cal` in main.cpp is still the 13 Oct (10 kΩ) calibration; the run used a calibration done at runtime.
+**Changed:**
+- `sun_tracker.cpp/.h`: `latch_far_error()`. Once |error| > 150° it commits to a turn direction; if noise flips the sign it reports the error the long way round (−179 → +181). It releases after |error| < 120° for 300 ms, so a short sensor spike can't release it. `LATCH_*` settings are in `definitions.h`.
+- `main.cpp` `sun_track()`: the controller uses the latched error. SD log adds `err_ctrl(deg)` and `latch`; telemetry adds `latch`.
+- `sim/sun_tracker_sim.py`: same latch (`use_latch`), plus a sensor model option (`half_power_deg`, `mx_spike_prob`) and scenarios `step180`, `step180hw`.
+**Agent verified (no hardware):** PlatformIO build succeeds. The C++ and Python latch give identical output on the SunTrack_data008 error sequence; there, sign flips while far from target drop from 487 to 2 and the latch never changes direction. This replay is open-loop (it can't show the real satellite's response). Other sim scenarios are unchanged (step90 1.4 s, step170 2.4 s, hold 100%).
+**We must verify on hardware:**
+- [ ] Run 13 starting with the light on +X (180°): `latch` should go to ±1 and stay, and KestrelSAT should turn one way until it faces the light
+- [ ] Check −X noise: send 5 (50%), then 11 with the light off; −X should stay near 0
+- [ ] Run 10 and paste the new sun_cal line into main.cpp (3.3 kΩ calibration)
+
+## 2026-10-30: Sun sensor read rotation backwards (SunTrack_data009) → ±Y pins swapped
+
+**Found in SunTrack_data009 (array started 90° from the light):** the controller asked for −Z, and the gyro (−65°) and the video both show a clockwise turn. But the light moved from the +Y channel to the +X channel (sun direction 89° → 0°), when a −Z body turn should move a fixed light toward −X (180°). SunTrack_data008 shows the same reversal. With that sign flipped, the true target is unstable and "array facing away" becomes the resting point, which matches both runs. The team confirmed ±X were right and asked for ±Y to be swapped in software.
+**Changed:**
+- `definitions.h`: `SUN_SENSOR_PLUS_Y_PIN` A1 → A3, `SUN_SENSOR_MINUS_Y_PIN` A3 → A1.
+- `main.cpp`: swapped the ±Y entries of the stored `sun_cal` to follow the pins (still the stale 13 Oct values).
+- `CLAUDE.md`: pin map updated.
+**Agent verified:** PlatformIO build succeeds.
+**We must verify on hardware:**
+- [ ] Command 11: light on +Y face → sDir ≈ 90°; on −Y → ≈ 270°
+- [ ] Run 10, paste the new sun_cal line
+- [ ] Command 15: step 4 (hand turn) should PASS with the gyro and sun sensor agreeing
+- [ ] Command 13 from 90° and from 180°
+- **Follow-up (command 11 + 10 on hardware, 30 Oct):** with the swap, spinning KestrelSAT +Z (gZ +72..+154) moved the light −Y → −X → +Y (sDir 270 → 180 → 90): the sun sensor and gyro now agree. Calibration (10) failed on ±Y because the light was aimed at the faces as labeled; the face labeled +Y is body −Y. Aim "+Y" steps at the face labeled −Y, or relabel the ±Y faces. Also, only one channel was ever lit at a time (sDir only 90/180/270), so there are blind gaps between faces.
+
+## 2026-10-30: ±Y pin swap reverted
+
+**Found (hardware, after the swap):**
+- Command 15 step 4 (slow hand turn, strong signals at both ends): gyro −90.1°, but the sun sensor said the body turned +89.4° (sDir 181 → 92). They still disagree, so the swap made it wrong.
+- SunTrack_data010 (swap + latch): latch −1, body turned −Z as commanded (gZ −44, −66 °/s), but the light moved +X → −Y; a −Z turn should move it toward +Y.
+- The earlier "follow-up" reading of command 11 was a mistake: the gyro adds up to only ~35° there while the light jumped 180°, so the light moved too. It was not a valid rotation test.
+- SunTrack_data009 still looks backwards with the original pins. It can't be reconciled with step 4 and 010 using the same wiring; a sensor wire may have been re-seated in between. Re-check with 15 step 4 using a lamp on a stand.
+- All four corner steps of command 15 failed (mag 0.07–0.20, at most one channel lit): the frame shades the face-mounted sensors. In 010 the sat swung into a gap, the sun was "lost" for 0.5 s, and the tracker stopped.
+- The latch worked as intended in 010 (held −1, one turn direction, no chatter).
+**Changed:**
+- `definitions.h`: `SUN_SENSOR_PLUS_Y_PIN` back to A1, `SUN_SENSOR_MINUS_Y_PIN` back to A3.
+- `main.cpp`: `sun_cal` is the 30 Oct command 10 result (3.3 kΩ) with its ±Y entries re-ordered for these pins: `{{0.0, 34.6, 0.0, 0.0}, {2086.7, 1680.1, 1777.8, 2771.7}}`.
+- `CLAUDE.md`: pin map back to A1 = +Y, A3 = −Y; resistor 3.3 kΩ.
+**Agent verified:** PlatformIO build succeeds.
+**We must verify on hardware:**
+- [ ] Upload, run 11: light on +Y face → sDir ≈ 90° (no recalibration needed)
+- [ ] Command 15 with the lamp on a stand ('s' to skip to step 4): step 4 should PASS
+- [ ] Command 13 from 90°

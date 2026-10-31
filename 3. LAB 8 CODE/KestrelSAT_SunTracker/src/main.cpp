@@ -133,7 +133,7 @@ float mag_X = 0.0;
 float mag_Y = 0.0;
 
 // Lab 8 Sun Tracker:
-SunCalibration sun_cal = {{74.5, 415.4, 641.5, 272.7}, {3249.1, 4095.0, 4036.5, 4094.8}}; // measured 13 Oct after fixing +/-Y sensors (command 10)
+SunCalibration sun_cal = {{0.0, 34.6, 0.0, 0.0}, {2086.7, 1680.1, 1777.8, 2771.7}}; // 30 Oct, 3.3k resistors (command 10, +/-Y entries re-ordered for the A1=+Y / A3=-Y pins)
 TrackerGains tracker_gains = {DEFAULT_KP, DEFAULT_KD, POINTING_DEADBAND_DEG, DEFAULT_MAX_RATE_DPS};
 WheelLimits wheel_limits = {WHEEL_MIN_RPM, WHEEL_MAX_RPM, WHEEL_MAX_ACCEL_RPM_S};
 float array_axis_deg = SOLAR_ARRAY_AXIS_DEG;
@@ -1621,7 +1621,7 @@ void sun_track() {
   if (sd_createDataFile(&dataFile, "SunTrack")) {
     dataFile.println("mcu time(ms),mode,sun_plusX(count),sun_plusY(count),sun_minusX(count),sun_minusY(count),"
                      "sun_mag,sun_direction(deg),error(deg),body_rate(deg/s),mag_X(uT),mag_Y(uT),"
-                     "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated");
+                     "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated,err_ctrl(deg),latch");
     dataFile.flush();
     dataFile.getName(file_name, sizeof(file_name));
     print_both(String("[INFO] Data file created successfully: ") + file_name);
@@ -1646,6 +1646,8 @@ void sun_track() {
   float w_cmd_rpm = 0.0;
   float w_prev_cmd_rpm = 0.0;   // for motor lag compensation
   float tau = 0.0;
+  FarErrorLatch latch = {0, 0.0};  // 180 deg direction latch
+  float err_ctrl = 0.0;            // error the controller used (after the latch)
   bool saturated = false;
   uint32_t saturated_since = 0;
   uint32_t last_saturation_warning = 0;
@@ -1711,7 +1713,8 @@ void sun_track() {
     } else {
       mode = "TRACK";
       sun_lost_since = 0;
-      tau = tracker_step(err, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
+      err_ctrl = latch_far_error(err, dt_s, LATCH_ENTER_DEG, LATCH_EXIT_DEG, LATCH_EXIT_TIME_MS / 1000.0, latch);
+      tau = tracker_step(err_ctrl, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
       if (fabs(err) <= 10.0) neopixelWrite(RGB_BUILTIN, 0, 255, 0);   // green: on target
       else                   neopixelWrite(RGB_BUILTIN, 255, 165, 0); // orange: slewing
     }
@@ -1745,10 +1748,12 @@ void sun_track() {
     dataFile.print(tau, 6);                       dataFile.print(",");
     dataFile.print(w_cmd_rpm, 1);                 dataFile.print(",");
     dataFile.print(w_meas, 1);                    dataFile.print(",");
-    dataFile.println(saturated ? 1 : 0);
+    dataFile.print(saturated ? 1 : 0);           dataFile.print(",");
+    dataFile.print(err_ctrl, 2);                  dataFile.print(",");
+    dataFile.println(latch.dir);
 
     // Telemetry (Name:value for GCS plotter): every point on USB, 2 Hz on XBee
-    String s = "t:" + String(t) + ",err:" + String(err, 1) + ",gZ:" + String(rate, 2) +
+    String s = "t:" + String(t) + ",err:" + String(err, 1) + ",latch:" + String(latch.dir) + ",gZ:" + String(rate, 2) +
                ",wCmd:" + String(w_cmd_rpm, 0) + ",wMeas:" + String(w_meas, 0) +
                ",sDir:" + String(sun.direction_deg, 1) +
                // same sun sensor fields as command 11, so the GCS Sun Map works during tracking
