@@ -85,6 +85,8 @@ Results with default gains (Kp = 0.0035, Kd = 0.0098, motor τ = 0.4 s):
 
 ## Known limitations and things to measure
 
+- **Scan-and-hold (command 13, 30 Oct).** With the sensors mid-face, only −X sees the light near the target, so the sun direction reads 181° anywhere in its cone (SunTrack_data011 rested ~20° off). Command 13 now turns one full circle (420°, ~9 s at 45°/s, LED purple), takes the heading where −X is brightest as the sun, and then holds that heading with the gyro. If −X drops below half its scan peak for 1 s while pointed there, it scans again. If a scan sees no sun, the test stops. Settings are `SCAN_*` and `REACQ_*` in `definitions.h`. Sim: settles in 11–12 s (R1 ≤ 15 s) and holds within ~2°; a moving light (S1) now fails because each move triggers a rescan.
+
 - **Starting with the sun exactly behind the array (180°).** Turning left and turning right are equally short, so sensor noise picked the sign of the error each sample and the push reversed ~10 times/s (SunTrack_data008). A direction latch (`latch_far_error()`, `LATCH_*` in `definitions.h`) now commits to one direction once |error| > 150° and releases below 120°. The SD log has `err_ctrl(deg)` (error after the latch) and `latch` (0, +1, −1).
 - **−X sensor noise with the wheel running.** In SunTrack_data008, −X jumped to 500–4095 counts while +X was lit, only once the wheel ran. Check the −X wiring and ground, keep sensor wires away from the motor leads, or add 0.1 µF from A2 to GND.
 

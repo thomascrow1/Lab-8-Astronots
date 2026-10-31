@@ -51,6 +51,17 @@
 #define LATCH_EXIT_DEG          120.0   // release once |error| stays below this...
 #define LATCH_EXIT_TIME_MS      300     // ...for this long (so a 1-2 sample sensor spike can't release it)
 
+// Scan-and-hold (30 Oct, SunTrack_data011: with only -X lit the sun direction reads 181 deg anywhere in its
+// cone, so KestrelSAT rested ~20 deg off). Spin one full turn, find the heading where -X is brightest,
+// then hold that heading with the gyro. Rescan if -X gets dim while pointed there.
+#define SCAN_RATE_DPS           45.0    // scan turn rate (one turn ~8 s)
+#define SCAN_TURN_DEG           420.0   // full turn + 30 deg each side, so the peak's bright stretch is never cut off
+#define SCAN_TIMEOUT_MS         30000   // give up on a scan after this long (wheel can't turn the body?)
+#define SCAN_PEAK_FRACTION      0.8     // sun heading = centre of the samples >= 80% of the peak
+#define REACQ_FRACTION          0.5     // rescan if -X brightness < 50% of the scan peak...
+#define REACQ_TIME_MS           1000    // ...for this long...
+#define REACQ_ON_TARGET_DEG     10.0    // ...while the gyro says we are pointed at the sun
+
 // Wheel limits:
 #define WHEEL_MIN_RPM           -400.0  // wheel may spin both ways (crosses 0 RPM) for twice the range
 #define WHEEL_MAX_RPM           400.0   // ~100% PWM on 5V supply

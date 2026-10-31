@@ -39,6 +39,15 @@ POINTING_DEADBAND_DEG = 3.0
 LATCH_ENTER_DEG = 150.0
 LATCH_EXIT_DEG = 120.0
 LATCH_EXIT_TIME_MS = 300
+SCAN_RATE_DPS = 45.0
+SCAN_TURN_DEG = 420.0
+SCAN_TIMEOUT_MS = 30000
+SCAN_PEAK_FRACTION = 0.8
+REACQ_FRACTION = 0.5
+REACQ_TIME_MS = 1000
+REACQ_ON_TARGET_DEG = 10.0
+SCAN_MAX_SAMPLES = 600
+TRACK_DURATION_MS = 120000
 WHEEL_MIN_RPM = -400.0
 WHEEL_MAX_RPM = 400.0
 WHEEL_MAX_ACCEL_RPM_S = 400.0
@@ -108,16 +117,61 @@ def tracker_step(error_deg, body_rate_dps, dt_s, kp, kd, deadband_deg, w_cmd_rpm
     else:
         tau = kp * error_rad
 
+    w_cmd_rpm, saturated = wheel_from_torque(tau, dt_s, w_cmd_rpm)
+    return tau, w_cmd_rpm, saturated
+
+
+def wheel_from_torque(tau, dt_s, w_cmd_rpm):
     accel_rpm_s = (-tau / I_WHEEL) * RPM_PER_RAD_S
     accel_rpm_s = max(-WHEEL_MAX_ACCEL_RPM_S, min(WHEEL_MAX_ACCEL_RPM_S, accel_rpm_s))
     w_cmd_rpm += accel_rpm_s * dt_s
-
     saturated = False
     if w_cmd_rpm > WHEEL_MAX_RPM:
         w_cmd_rpm, saturated = WHEEL_MAX_RPM, True
     if w_cmd_rpm < WHEEL_MIN_RPM:
         w_cmd_rpm, saturated = WHEEL_MIN_RPM, True
+    return w_cmd_rpm, saturated
+
+
+def rate_step(rate_des_dps, body_rate_dps, dt_s, kd, w_cmd_rpm):
+    """Same as rate_step() in sun_tracker.cpp: turn the body at a set rate (scan)."""
+    tau = kd * math.radians(rate_des_dps - body_rate_dps)
+    w_cmd_rpm, saturated = wheel_from_torque(tau, dt_s, w_cmd_rpm)
     return tau, w_cmd_rpm, saturated
+
+
+def scan_start(heading_deg):
+    return {"start": heading_deg, "h": [], "b": []}
+
+
+def scan_add(scan, heading_deg, brightness, turn_deg=SCAN_TURN_DEG):
+    if len(scan["h"]) < SCAN_MAX_SAMPLES:
+        scan["h"].append(heading_deg)
+        scan["b"].append(brightness)
+    return abs(heading_deg - scan["start"]) >= turn_deg or len(scan["h"]) >= SCAN_MAX_SAMPLES
+
+
+def scan_result(scan, peak_fraction=SCAN_PEAK_FRACTION, min_bright=SUN_LOST_THRESHOLD):
+    """Same as scan_result() in sun_tracker.cpp. Returns (found, sun_heading_deg, peak)."""
+    b, h = scan["b"], scan["h"]
+    if not b:
+        return False, 0.0, 0.0
+    edge = max(0.0, (abs(h[-1] - scan["start"]) - 360.0) / 2.0)  # search the middle 360 deg only
+    idx = [i for i in range(len(b)) if abs(h[i] - scan["start"]) >= edge and abs(h[-1] - h[i]) >= edge]
+    if not idx:
+        return False, 0.0, 0.0
+    i_max = max(idx, key=lambda i: (b[i], -i))  # first maximum, like the C++ loop
+    peak = b[i_max]
+    if peak < min_bright:
+        return False, 0.0, peak
+    thr = peak_fraction * peak
+    i0 = i1 = i_max
+    while i0 > 0 and b[i0 - 1] >= thr:
+        i0 -= 1
+    while i1 < len(b) - 1 and b[i1 + 1] >= thr:
+        i1 += 1
+    w = sum(b[i0:i1 + 1])
+    return True, sum(bi * hi for bi, hi in zip(b[i0:i1 + 1], h[i0:i1 + 1])) / w, peak
 
 
 def motor_lag_comp(w_cmd_rpm, w_prev_cmd_rpm, dt_s, motor_tau_s, max_rpm):
@@ -135,14 +189,17 @@ def phototransistor_response(angle_off_axis_deg, half_power_deg=50.0):
     return c ** p if c > 0 else 0.0
 
 
-def sun_sensor(sun_body_deg, rng, noise, intensity=1.0, half_power_deg=50.0, mx_spike_prob=0.0):
+def sun_sensor(sun_body_deg, rng, noise, intensity=1.0, half_power_deg=50.0, mx_spike_prob=0.0,
+               adc_floor=0.0):
     """mx_spike_prob: chance per sample that -X reads a false bright value (motor noise seen in
-    SunTrack_data008 once the wheel was running)."""
+    SunTrack_data008 once the wheel was running).
+    adc_floor: calibrated readings below this read 0 (the ESP32 ADC reads 0 below ~150 mV), which
+    leaves only one channel lit near a face (SunTrack_data011)."""
     norm = []
     for axis in SENSOR_AXES_DEG:
         n = intensity * phototransistor_response(wrap180(sun_body_deg - axis), half_power_deg)
         n += rng.normal(0.0, noise)
-        norm.append(max(0.0, n))
+        norm.append(n if n >= adc_floor else 0.0)
     if mx_spike_prob > 0 and rng.random() < mx_spike_prob:
         norm[2] = rng.uniform(0.2, 1.2)
     return norm
@@ -151,7 +208,8 @@ def sun_sensor(sun_body_deg, rng, noise, intensity=1.0, half_power_deg=50.0, mx_
 def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
              sun_start_deg=90.0, sun_rate_dps=0.0, duration_s=60.0,
              motor_tau_s=MOTOR_TAU_S, string_k=0.0, gyro_noise_dps=0.1, sun_noise=0.01,
-             sun_off_at_s=None, half_power_deg=50.0, mx_spike_prob=0.0, use_latch=True, seed=1):
+             sun_off_at_s=None, half_power_deg=50.0, mx_spike_prob=0.0, use_latch=True,
+             adc_floor=0.0, gyro_bias_dps=0.0, use_scan=True, seed=1):
     """
     sun_start_deg : sun azimuth in the body frame at release (0 = +X; array is at 180)
     sun_rate_dps  : light source moving around KestrelSAT (deg/s, inertial)
@@ -160,6 +218,9 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     sun_off_at_s  : turn the light off at this time to test sun-lost behaviour
     half_power_deg: phototransistor half-power angle (~33 deg measured in SunTrack_data008)
     mx_spike_prob : chance per sample of a false -X reading while the wheel runs
+    adc_floor     : calibrated readings below this read 0 (ESP32 ADC dead zone)
+    gyro_bias_dps : constant gyro bias (removed by the bias measured while held)
+    use_scan      : True = scan-and-hold (current firmware), False = old sun-sensor PD
     """
     rng = np.random.default_rng(seed)
     dt = 0.001
@@ -176,8 +237,11 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     released = False
     w_prev_cmd = 0.0
     latch = {"dir": 0, "below_s": 0.0}
+    bias_sum, bias_n, gyro_bias, heading = 0.0, 0, 0.0, 0.0
+    control_started, acquiring = False, False
+    sun_heading, sun_peak, scan, scan_t0, dim_since = 0.0, 0.0, None, 0.0, None
 
-    log = {k: [] for k in ["t", "mode", "sun_dir", "err", "rate", "w_cmd", "w_meas", "tau", "sat"]}
+    log = {k: [] for k in ["t", "mode", "sun_dir", "err", "rate", "w_cmd", "w_meas", "tau", "sat", "true_err"]}
     t = 0.0
     step = 0
     while t < duration_s:
@@ -187,10 +251,13 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
 
         # ---- sense (body frame sun azimuth = inertial sun azimuth - body angle)
         spikes = mx_spike_prob if t_ms >= TRACK_CONTROL_MS else 0.0
-        norm = sun_sensor(sun_inertial - theta, rng, sun_noise, intensity, half_power_deg, spikes)
+        norm = sun_sensor(sun_inertial - theta, rng, sun_noise, intensity, half_power_deg, spikes, adc_floor)
         sun_dir, mag = compute_sun(norm)
         err = wrap180(sun_dir - SOLAR_ARRAY_AXIS_DEG)
-        rate_meas = math.degrees(omega_b) + rng.normal(0.0, gyro_noise_dps)
+        true_err = wrap180(sun_inertial - theta - SOLAR_ARRAY_AXIS_DEG)
+        rate_meas = math.degrees(omega_b) + gyro_bias_dps + rng.normal(0.0, gyro_noise_dps)
+        if control_started:
+            heading += (rate_meas - gyro_bias) * DT_CONTROL
 
         # ---- decide & control (same structure as sun_track())
         saturated = False
@@ -201,6 +268,39 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
         elif t_ms < TRACK_CONTROL_MS:
             mode = "HOLD"
             w_cmd = bias_rpm
+            if TRACK_SPINUP_MS <= t_ms < TRACK_RELEASE_MS:
+                bias_sum += rate_meas
+                bias_n += 1
+        elif use_scan:
+            # ---- scan-and-hold (same as sun_track() in main.cpp)
+            if not control_started:
+                control_started = True
+                gyro_bias = bias_sum / bias_n if bias_n else 0.0
+                heading = 0.0
+                acquiring, scan, scan_t0 = True, scan_start(0.0), t_ms
+            if acquiring:
+                mode = "ACQUIRE"
+                tau, w_cmd, saturated = rate_step(SCAN_RATE_DPS, rate_meas, DT_CONTROL, kd, w_cmd)
+                done = scan_add(scan, heading, norm[2])
+                if done or t_ms - scan_t0 > SCAN_TIMEOUT_MS:
+                    found, sun_heading, sun_peak = scan_result(scan)
+                    if not found:
+                        mode, w_cmd = "STOPPED", 0.0
+                    else:
+                        acquiring, dim_since = False, None
+                        latch = {"dir": 0, "below_s": 0.0}
+            else:
+                mode = "TRACK"
+                err_gyro = wrap180(sun_heading - heading)
+                err_ctrl = latch_far_error(err_gyro, DT_CONTROL, latch) if use_latch else err_gyro
+                tau, w_cmd, saturated = tracker_step(err_ctrl, rate_meas, DT_CONTROL, kp, kd,
+                                                     POINTING_DEADBAND_DEG, w_cmd)
+                if abs(err_gyro) < REACQ_ON_TARGET_DEG and norm[2] < REACQ_FRACTION * sun_peak:
+                    dim_since = t_ms if dim_since is None else dim_since
+                    if t_ms - dim_since > REACQ_TIME_MS:
+                        acquiring, scan, scan_t0 = True, scan_start(heading), t_ms
+                else:
+                    dim_since = None
         elif mag < SUN_LOST_THRESHOLD:
             mode = "NOSUN"
             if sun_lost_since is None:
@@ -215,7 +315,8 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
             tau, w_cmd, saturated = tracker_step(err_ctrl, rate_meas, DT_CONTROL, kp, kd,
                                                  POINTING_DEADBAND_DEG, w_cmd)
 
-        for key, val in zip(log.keys(), [t, mode, sun_dir, err, math.degrees(omega_b), w_cmd, w_wheel, tau, saturated]):
+        for key, val in zip(log.keys(), [t, mode, sun_dir, err, math.degrees(omega_b), w_cmd, w_wheel, tau,
+                                         saturated, true_err]):
             log[key].append(val)
         if mode == "STOPPED":
             break
@@ -241,9 +342,9 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
 
 
 def settling_time(log, band_deg=10.0):
-    """Time after control start at which |err| enters the band and stays there."""
+    """Time after control start at which the TRUE pointing error enters the band and stays there."""
     track = log["t"] >= TRACK_CONTROL_MS / 1000.0
-    t, err = log["t"][track], np.abs(log["err"][track])
+    t, err = log["t"][track], np.abs(log["true_err"][track])
     outside = np.where(err > band_deg)[0]
     if len(outside) == 0:
         return 0.0
@@ -258,6 +359,8 @@ SCENARIOS = {
     "step180":  dict(sun_start_deg=0.0, description="Sun exactly behind the array (180 deg)"),
     "step180hw": dict(sun_start_deg=0.0, half_power_deg=33.0, sun_noise=0.02, mx_spike_prob=0.06,
                       description="180 deg + narrow sensors + -X motor noise (like SunTrack_data008)"),
+    "hwoffset": dict(sun_start_deg=150.0, string_k=0.0005, half_power_deg=33.0, adc_floor=0.08,
+                     gyro_bias_dps=0.05, description="Only -X lit near target + string twist (SunTrack_data011)"),
     "hold":     dict(sun_start_deg=175.0, duration_s=80.0, description="R2: hold on target 60 s"),
     "moving":   dict(sun_start_deg=150.0, sun_rate_dps=5.0, description="Stretch: light moving 5 deg/s"),
     "string":   dict(sun_start_deg=90.0, string_k=0.0005, description="R1 with string torsion"),
@@ -268,7 +371,8 @@ SCENARIOS = {
 def plot(log, title, path=None, show=False):
     fig, ax = plt.subplots(3, 1, sharex=True, figsize=(9, 8))
     t = log["t"]
-    ax[0].plot(t, log["err"], label="pointing error")
+    ax[0].plot(t, log["err"], label="sun sensor error", alpha=0.6)
+    ax[0].plot(t, log["true_err"], label="true error", color="k", lw=1)
     ax[0].axhspan(-10, 10, color="tab:green", alpha=0.15, label="±10° requirement")
     ax[0].set_ylabel("error (deg)")
     ax[1].plot(t, log["rate"], color="tab:orange")
@@ -315,7 +419,7 @@ def main():
         log = simulate(kp=args.kp, kd=args.kd, bias_pwm=args.bias, motor_tau_s=args.motor_tau, **cfg)
         ts = settling_time(log)
         track = log["mode"] == "TRACK"
-        within = np.mean(np.abs(log["err"][track]) <= 10.0) * 100 if track.any() else 0.0
+        within = np.mean(np.abs(log["true_err"][track]) <= 10.0) * 100 if track.any() else 0.0
         sat = np.mean(log["sat"][track]) * 100 if track.any() else 0.0
         ts_txt = "never" if ts is None else f"{ts:5.1f} s"
         print(f"{name:8s} | settle(±10°): {ts_txt:>8s} | time within ±10°: {within:5.1f}% | "

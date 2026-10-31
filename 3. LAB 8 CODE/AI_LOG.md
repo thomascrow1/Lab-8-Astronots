@@ -165,3 +165,18 @@ One entry per agent session. Record what the agent made, what we changed, and ho
 - [ ] Upload, run 11: light on +Y face → sDir ≈ 90° (no recalibration needed)
 - [ ] Command 15 with the lamp on a stand ('s' to skip to step 4): step 4 should PASS
 - [ ] Command 13 from 90°
+
+## 2026-10-30: Scan-and-hold tracking (fixes the ~20° steady offset in SunTrack_data011)
+
+**Found in SunTrack_data011 (first run that tracked):** after the slew, only −X saw the light (n−X 0.7–1.2, others ≤ 0.02), so sun direction read 181.0 ± 0.2° the whole hold while the brightness drifted. The controller saw ~1° error (inside the 3° deadband), and the string left KestrelSAT ~20° off.
+**Changed (team's design):**
+- `sun_tracker.cpp/.h`: `rate_step()` (turn at a set rate; shares `wheel_from_torque()` with `tracker_step`), and the scan: `scan_start()`, `scan_add()`, `scan_result()`. The sun heading is the brightness-weighted centre of the −X samples ≥ 80% of the peak, searched in the middle 360° of a 420° turn.
+- `main.cpp` `sun_track()`: gyro bias measured while held; after release: ACQUIRE (one 420° turn at 45°/s, LED purple) → TRACK (PD on `wrap180(sun_heading − heading)`, with the latch). Rescan if −X < 50% of the scan peak for 1 s while within 10° of the sun heading. Test stops if a scan finds no sun. The old "sun lost" stop and the "no sun at start" abort are removed. SD log adds `heading(deg)`, `sun_heading(deg)`; telemetry adds `hdg`, `sunHdg`, `acq`.
+- `definitions.h`: `SCAN_*`, `REACQ_*` settings.
+- `sim/sun_tracker_sim.py`: same logic (`use_scan`), plus the ADC floor (`adc_floor`), a gyro bias, true error logging, and scenario `hwoffset`.
+- `analysis/plot_suntrack.py`: ACQUIRE shading, plots `err_ctrl`, and R1 counts from the scan start.
+**Agent verified (no hardware):** PlatformIO build succeeds. C++ and Python scan agree to 0.0001° on 300 random scans; the scan finds the sun within 0.65° on average (worst 2.75°) at the hardware's 33° half-power angle with noise and the ADC floor. Sim, true error: `hwoffset` 27° (old) → ~2° (new); all fixed-light scenarios settle in 11–12 s; `moving` (5°/s) now fails (keeps rescanning); `sunlost` stops after the rescan finds nothing. With string twist the wheel ramps toward −400 RPM during a long hold (saturates after ~1 min in `hwoffset`).
+**We must verify on hardware:**
+- [ ] Command 13: LED purple, KestrelSAT turns one full circle, prints "Sun found at heading …", then turns back and holds; check by eye/video that −X faces the lamp
+- [ ] Watch the wheel speed during a long hold (string twist)
+- [ ] Block the lamp for >1 s: it should print "Rescanning" and spin again

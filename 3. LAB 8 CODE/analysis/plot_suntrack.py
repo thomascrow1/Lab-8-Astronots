@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 BAND_DEG = 10.0
-MODE_COLORS = {"SPINUP": "gold", "HOLD": "tab:blue", "TRACK": "white", "NOSUN": "tab:red"}
+MODE_COLORS = {"SPINUP": "gold", "HOLD": "tab:blue", "ACQUIRE": "tab:purple", "TRACK": "white", "NOSUN": "tab:red"}
 
 
 def load(path):
@@ -47,6 +47,8 @@ def load(path):
         "w_meas": col("w_RW_meas(RPM)"),
         "tau": col("torque_cmd(N*m)"),
         "sat": col("saturated").astype(bool),
+        # newer firmware: error the controller used (gyro heading error after a scan), may be missing
+        "err_ctrl": col("err_ctrl(deg)") if "err_ctrl(deg)" in rows[0] else None,
     }
 
 
@@ -66,8 +68,9 @@ def summarize(d):
     track = d["mode"] == "TRACK"
     if not track.any():
         return {"settle_s": None, "within_pct": 0.0, "longest_s": 0.0, "rms_deg": None, "sat_pct": 0.0}
+    # control starts at the first ACQUIRE (scan) or TRACK sample, so R1 includes the scan time
+    t_control = d["t"][np.isin(d["mode"], ["ACQUIRE", "TRACK"])][0]
     t, err = d["t"][track], np.abs(d["err"][track])
-    t_control = t[0]
     outside = np.where(err > BAND_DEG)[0]
     if len(outside) == 0:
         settle = 0.0
@@ -100,7 +103,9 @@ def plot(d, title, out_path, show):
     fig, ax = plt.subplots(4, 1, sharex=True, figsize=(10, 10))
     t = d["t"]
 
-    ax[0].plot(t, d["err"], lw=1.2, label="pointing error")
+    ax[0].plot(t, d["err"], lw=1.2, label="pointing error (sun sensor)")
+    if d["err_ctrl"] is not None:
+        ax[0].plot(t, d["err_ctrl"], lw=1, color="k", alpha=0.7, label="error used by controller")
     ax[0].axhspan(-BAND_DEG, BAND_DEG, color="tab:green", alpha=0.15, label=f"±{BAND_DEG:.0f}° requirement")
     ax[0].set_ylabel("error (deg)")
     ax[0].legend(loc="upper right")
@@ -125,7 +130,7 @@ def plot(d, title, out_path, show):
     for a in ax:
         shade_modes(a, d)
         a.grid(alpha=0.3)
-    fig.suptitle(title + "\nshading: yellow = spin-up, blue = hold/release, red = no sun")
+    fig.suptitle(title + "\nshading: yellow = spin-up, blue = hold/release, purple = scan, red = no sun")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     if show:

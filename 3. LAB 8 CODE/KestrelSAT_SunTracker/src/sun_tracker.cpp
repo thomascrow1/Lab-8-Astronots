@@ -86,6 +86,22 @@ float latch_far_error(float error_deg, float dt_s, float enter_deg, float exit_d
 }
 
 /**
+ * @brief Turn a desired body torque into a wheel speed command (shared by tracker_step and rate_step).
+ */
+static void wheel_from_torque(float tau, float dt_s, const WheelLimits &limits,
+                              float I_wheel, float &w_cmd_rpm, bool &saturated) {
+  float accel_rpm_s = (-tau / I_wheel) * RPM_PER_RAD_S;
+  if (accel_rpm_s >  limits.max_accel_rpm_s) accel_rpm_s =  limits.max_accel_rpm_s;
+  if (accel_rpm_s < -limits.max_accel_rpm_s) accel_rpm_s = -limits.max_accel_rpm_s;
+
+  w_cmd_rpm += accel_rpm_s * dt_s;
+
+  saturated = false;
+  if (w_cmd_rpm > limits.max_rpm) { w_cmd_rpm = limits.max_rpm; saturated = true; }
+  if (w_cmd_rpm < limits.min_rpm) { w_cmd_rpm = limits.min_rpm; saturated = true; }
+}
+
+/**
  * @brief One step of the PD sun-pointing controller.
  *
  * 1. Desired body torque:  tau = Kp * error - Kd * body_rate
@@ -117,17 +133,65 @@ float tracker_step(float error_deg, float body_rate_dps, float dt_s,
     tau = gains.Kp * error_rad;
   }
 
-  float accel_rpm_s = (-tau / I_wheel) * RPM_PER_RAD_S;
-  if (accel_rpm_s >  limits.max_accel_rpm_s) accel_rpm_s =  limits.max_accel_rpm_s;
-  if (accel_rpm_s < -limits.max_accel_rpm_s) accel_rpm_s = -limits.max_accel_rpm_s;
-
-  w_cmd_rpm += accel_rpm_s * dt_s;
-
-  saturated = false;
-  if (w_cmd_rpm > limits.max_rpm) { w_cmd_rpm = limits.max_rpm; saturated = true; }
-  if (w_cmd_rpm < limits.min_rpm) { w_cmd_rpm = limits.min_rpm; saturated = true; }
-
+  wheel_from_torque(tau, dt_s, limits, I_wheel, w_cmd_rpm, saturated);
   return tau;
+}
+
+/**
+ * @brief Turn the body at a set rate (deg/s) with the reaction wheel. Used for the sun scan.
+ */
+float rate_step(float rate_des_dps, float body_rate_dps, float dt_s,
+                const TrackerGains &gains, const WheelLimits &limits,
+                float I_wheel, float &w_cmd_rpm, bool &saturated) {
+  float tau = gains.Kd * (rate_des_dps - body_rate_dps) / DEG_PER_RAD;
+  wheel_from_torque(tau, dt_s, limits, I_wheel, w_cmd_rpm, saturated);
+  return tau;
+}
+
+void scan_start(SunScan &scan, float heading_deg) {
+  scan.start_heading_deg = heading_deg;
+  scan.n = 0;
+}
+
+bool scan_add(SunScan &scan, float heading_deg, float brightness, float turn_deg) {
+  if (scan.n < SCAN_MAX_SAMPLES) {
+    scan.heading_deg[scan.n] = heading_deg;
+    scan.bright[scan.n] = brightness;
+    scan.n++;
+  }
+  return fabsf(heading_deg - scan.start_heading_deg) >= turn_deg || scan.n >= SCAN_MAX_SAMPLES;
+}
+
+bool scan_result(const SunScan &scan, float peak_fraction, float min_bright,
+                 float &sun_heading_deg, float &peak) {
+  if (scan.n == 0) return false;
+  // Look for the peak only in the middle 360 deg of the scan, so the bright stretch around it
+  // is never cut off by the start or end of the scan (that cost up to ~12 deg in the sim).
+  float start = scan.start_heading_deg;
+  float last = scan.heading_deg[scan.n - 1];
+  float edge = (fabsf(last - start) - 360.0f) / 2.0f;
+  if (edge < 0.0f) edge = 0.0f;  // scan timed out before a full turn: use everything
+  int i_max = -1;
+  for (int i = 0; i < scan.n; i++) {
+    if (fabsf(scan.heading_deg[i] - start) < edge || fabsf(last - scan.heading_deg[i]) < edge) continue;
+    if (i_max < 0 || scan.bright[i] > scan.bright[i_max]) i_max = i;
+  }
+  if (i_max < 0) return false;
+  peak = scan.bright[i_max];
+  if (peak < min_bright) return false;
+
+  // Walk out from the peak while still bright, then take the brightness-weighted centre.
+  float threshold = peak_fraction * peak;
+  int i0 = i_max, i1 = i_max;
+  while (i0 > 0 && scan.bright[i0 - 1] >= threshold) i0--;
+  while (i1 < scan.n - 1 && scan.bright[i1 + 1] >= threshold) i1++;
+  float sum_w = 0.0f, sum_wh = 0.0f;
+  for (int i = i0; i <= i1; i++) {
+    sum_w += scan.bright[i];
+    sum_wh += scan.bright[i] * scan.heading_deg[i];
+  }
+  sun_heading_deg = sum_wh / sum_w;
+  return true;
 }
 
 /**

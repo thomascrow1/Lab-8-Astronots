@@ -73,6 +73,37 @@ float tracker_step(float error_deg, float body_rate_dps, float dt_s,
                    const TrackerGains &gains, const WheelLimits &limits,
                    float I_wheel, float &w_cmd_rpm, bool &saturated);
 
+// Rate hold: same wheel math as tracker_step, but turns the body at a set rate (used for the scan).
+// Returns the desired body torque (N*m) for logging.
+float rate_step(float rate_des_dps, float body_rate_dps, float dt_s,
+                const TrackerGains &gains, const WheelLimits &limits,
+                float I_wheel, float &w_cmd_rpm, bool &saturated);
+
+// ---- Sun acquisition scan ----
+// KestrelSAT turns one full circle while recording gyro heading and -X brightness. The sun's
+// heading is the centre of the brightest stretch. This works even though the -X sensor only
+// reports "sun is somewhere in my cone": brightness still peaks when -X points straight at it.
+const int SCAN_MAX_SAMPLES = 600;  // 30 s at 20 Hz
+
+struct SunScan {
+  float start_heading_deg;
+  int n;
+  float heading_deg[SCAN_MAX_SAMPLES];
+  float bright[SCAN_MAX_SAMPLES];
+};
+
+// Start a new scan at the current heading.
+void scan_start(SunScan &scan, float heading_deg);
+
+// Add one sample. Returns true once the scan has turned turn_deg (or the buffer is full).
+bool scan_add(SunScan &scan, float heading_deg, float brightness, float turn_deg);
+
+// Find the sun: the brightness-weighted centre of the samples around the brightest one that
+// are >= peak_fraction * the peak (the peak is searched for in the middle 360 deg of the scan).
+// Returns false if the peak is below min_bright (no sun seen).
+bool scan_result(const SunScan &scan, float peak_fraction, float min_bright,
+                 float &sun_heading_deg, float &peak);
+
 // Wheel speed to send to the motor so the (laggy) wheel follows w_cmd_rpm.
 //   max_rpm : wheel speed at 100% PWM (RPM_PER_PWM)
 float motor_lag_comp(float w_cmd_rpm, float w_prev_cmd_rpm, float dt_s,

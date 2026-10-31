@@ -1612,16 +1612,22 @@ void sun_sign_check() {
  * Timeline (ms after start, see definitions.h):
  *  - 0 to TRACK_SPINUP_MS      : SPINUP - ramp wheel to bias speed (hold KestrelSAT still), LED yellow
  *  - to TRACK_CONTROL_MS       : HOLD   - wheel at bias; LED turns BLUE at TRACK_RELEASE_MS = let go
- *  - to TRACK_DURATION_MS      : TRACK  - PD control, LED green within 10 deg, orange outside
- *  - sun lost > SUN_LOST_TIME_MS: wheel stopped, warning sent, test ends
- *  - 'X' at any time           : wheel stopped, test ends
+ *  - after TRACK_CONTROL_MS    : ACQUIRE - turn one full circle at SCAN_RATE_DPS, find the heading where
+ *                                          -X is brightest (LED purple)
+ *                                TRACK   - hold that heading with the gyro (PD), LED green within 10 deg,
+ *                                          orange outside. If -X gets dim while pointed there -> ACQUIRE again
+ *  - no sun found in a scan    : wheel stopped, warning sent, test ends
+ *  - TRACK_DURATION_MS or 'X'  : wheel stopped, test ends
+ * The gyro bias is measured while KestrelSAT is held (SPINUP/HOLD) and removed from the heading.
  */
+static SunScan sun_scan;  // ~5 KB, kept off the stack
 void sun_track() {
   char file_name[40];
   if (sd_createDataFile(&dataFile, "SunTrack")) {
     dataFile.println("mcu time(ms),mode,sun_plusX(count),sun_plusY(count),sun_minusX(count),sun_minusY(count),"
                      "sun_mag,sun_direction(deg),error(deg),body_rate(deg/s),mag_X(uT),mag_Y(uT),"
-                     "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated,err_ctrl(deg),latch");
+                     "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated,err_ctrl(deg),latch,"
+                     "heading(deg),sun_heading(deg)");
     dataFile.flush();
     dataFile.getName(file_name, sizeof(file_name));
     print_both(String("[INFO] Data file created successfully: ") + file_name);
@@ -1633,9 +1639,7 @@ void sun_track() {
   float raw[4];
   read_sun_raw(raw);
   if (compute_sun(raw, sun_cal).magnitude < SUN_LOST_THRESHOLD) {
-    print_both("[CAUTION] No sun detected. Turn on the light / recalibrate (10) and try again.");
-    dataFile.close();
-    return;
+    print_both("[CAUTION] No sun seen right now (OK if it is in a blind spot; the scan will look for it).");
   }
 
   print_both("[INFO] Ready to run sun tracker. HOLD KestrelSAT still and send any key to begin.");
@@ -1648,10 +1652,19 @@ void sun_track() {
   float tau = 0.0;
   FarErrorLatch latch = {0, 0.0};  // 180 deg direction latch
   float err_ctrl = 0.0;            // error the controller used (after the latch)
+  float gyro_bias = 0.0;           // deg/s, measured while held
+  float bias_sum = 0.0;
+  int bias_n = 0;
+  float heading = 0.0;             // deg, integrated gyro since control start (+Z)
+  bool acquiring = false;
+  bool control_started = false;
+  float sun_heading = 0.0;         // heading where -X was brightest
+  float sun_peak = 0.0;            // that brightness (calibrated -X)
+  uint32_t scan_t0 = 0;
+  uint32_t dim_since = 0;
   bool saturated = false;
   uint32_t saturated_since = 0;
   uint32_t last_saturation_warning = 0;
-  uint32_t sun_lost_since = 0;
   bool release_announced = false;
   int test_point_count = 0;
 
@@ -1683,7 +1696,7 @@ void sun_track() {
     float err = pointing_error_deg(sun.direction_deg, array_axis_deg);
     float rate = read_body_rate_dps();
     float w_meas = measure_wheel_rpm();
-    bool sun_visible = sun.magnitude >= SUN_LOST_THRESHOLD;
+    if (control_started) heading += (rate - gyro_bias) * dt_s;
 
     // Decide & control:
     const char *mode;
@@ -1695,28 +1708,65 @@ void sun_track() {
     } else if (t < TRACK_CONTROL_MS) {
       mode = "HOLD";
       w_cmd_rpm = bias_rpm;
+      if (t >= TRACK_SPINUP_MS && t < TRACK_RELEASE_MS) { bias_sum += rate; bias_n++; } // held still
       if (t >= TRACK_RELEASE_MS && !release_announced) {
         release_announced = true;
         neopixelWrite(RGB_BUILTIN, 0, 0, 255); // blue: release
         print_both("[INFO] RELEASE KestrelSAT now.");
       }
-    } else if (!sun_visible) {
-      mode = "NOSUN"; // keep last wheel command while waiting to see if the sun comes back
-      if (sun_lost_since == 0) sun_lost_since = now;
-      if (now - sun_lost_since > SUN_LOST_TIME_MS) {
-        driver.setOutput(0);
-        dataFile.close();
-        neopixelWrite(RGB_BUILTIN, 255, 0, 0); // red
-        print_both(String("[WARN] SUN LOST at t=") + t + " ms. Wheel stopped. File " + file_name + " closed.");
-        return;
-      }
     } else {
-      mode = "TRACK";
-      sun_lost_since = 0;
-      err_ctrl = latch_far_error(err, dt_s, LATCH_ENTER_DEG, LATCH_EXIT_DEG, LATCH_EXIT_TIME_MS / 1000.0, latch);
-      tau = tracker_step(err_ctrl, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
-      if (fabs(err) <= 10.0) neopixelWrite(RGB_BUILTIN, 0, 255, 0);   // green: on target
-      else                   neopixelWrite(RGB_BUILTIN, 255, 165, 0); // orange: slewing
+      if (!control_started) {
+        control_started = true;
+        gyro_bias = (bias_n > 0) ? bias_sum / bias_n : 0.0;
+        heading = 0.0;
+        acquiring = true;
+        scan_start(sun_scan, heading);
+        scan_t0 = now;
+        print_both(String("[INFO] Gyro bias ") + String(gyro_bias, 3) + " deg/s. Scanning for the sun (one full turn).");
+      }
+
+      if (acquiring) {
+        mode = "ACQUIRE";
+        neopixelWrite(RGB_BUILTIN, 128, 0, 128); // purple: scanning
+        tau = rate_step(SCAN_RATE_DPS, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
+        bool done = scan_add(sun_scan, heading, sun.norm[SUN_MX], SCAN_TURN_DEG);
+        if (done || now - scan_t0 > SCAN_TIMEOUT_MS) {
+          if (!scan_result(sun_scan, SCAN_PEAK_FRACTION, SUN_LOST_THRESHOLD, sun_heading, sun_peak)) {
+            driver.setOutput(0);
+            dataFile.close();
+            neopixelWrite(RGB_BUILTIN, 255, 0, 0); // red
+            print_both(String("[WARN] No sun found in the scan (brightest -X ") + String(sun_peak, 2) +
+                       "). Wheel stopped. File " + file_name + " closed.");
+            return;
+          }
+          if (!done) print_both("[CAUTION] Scan timed out before a full turn; using what was seen.");
+          acquiring = false;
+          dim_since = 0;
+          latch = {0, 0.0};
+          print_both(String("[INFO] Sun found at heading ") + String(sun_heading, 1) + " deg (peak -X " +
+                     String(sun_peak, 2) + "). Tracking with the gyro.");
+        }
+      } else {
+        mode = "TRACK";
+        float err_gyro = wrap180(sun_heading - heading);
+        err_ctrl = latch_far_error(err_gyro, dt_s, LATCH_ENTER_DEG, LATCH_EXIT_DEG, LATCH_EXIT_TIME_MS / 1000.0, latch);
+        tau = tracker_step(err_ctrl, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
+        if (fabs(err_gyro) <= 10.0) neopixelWrite(RGB_BUILTIN, 0, 255, 0);   // green: on target
+        else                        neopixelWrite(RGB_BUILTIN, 255, 165, 0); // orange: slewing
+
+        // Pointed at the sun's heading but -X is dim: the sun moved or the heading drifted -> rescan.
+        if (fabs(err_gyro) < REACQ_ON_TARGET_DEG && sun.norm[SUN_MX] < REACQ_FRACTION * sun_peak) {
+          if (dim_since == 0) dim_since = now;
+          if (now - dim_since > REACQ_TIME_MS) {
+            acquiring = true;
+            scan_start(sun_scan, heading);
+            scan_t0 = now;
+            print_both(String("[INFO] -X dimmed to ") + String(sun.norm[SUN_MX], 2) + " at t=" + t + " ms. Rescanning.");
+          }
+        } else {
+          dim_since = 0;
+        }
+      }
     }
     set_wheel_rpm(motor_lag_comp(w_cmd_rpm, w_prev_cmd_rpm, dt_s, MOTOR_TAU_S, RPM_PER_PWM));
     w_prev_cmd_rpm = w_cmd_rpm;
@@ -1750,10 +1800,13 @@ void sun_track() {
     dataFile.print(w_meas, 1);                    dataFile.print(",");
     dataFile.print(saturated ? 1 : 0);           dataFile.print(",");
     dataFile.print(err_ctrl, 2);                  dataFile.print(",");
-    dataFile.println(latch.dir);
+    dataFile.print(latch.dir);                    dataFile.print(",");
+    dataFile.print(heading, 2);                   dataFile.print(",");
+    dataFile.println(sun_heading, 2);
 
     // Telemetry (Name:value for GCS plotter): every point on USB, 2 Hz on XBee
-    String s = "t:" + String(t) + ",err:" + String(err, 1) + ",latch:" + String(latch.dir) + ",gZ:" + String(rate, 2) +
+    String s = "t:" + String(t) + ",err:" + String(err, 1) + ",latch:" + String(latch.dir) + ",hdg:" + String(heading, 1) +
+               ",sunHdg:" + String(sun_heading, 1) + ",acq:" + String(acquiring ? 1 : 0) + ",gZ:" + String(rate, 2) +
                ",wCmd:" + String(w_cmd_rpm, 0) + ",wMeas:" + String(w_meas, 0) +
                ",sDir:" + String(sun.direction_deg, 1) +
                // same sun sensor fields as command 11, so the GCS Sun Map works during tracking
