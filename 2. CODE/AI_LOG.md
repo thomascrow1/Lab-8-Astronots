@@ -209,3 +209,92 @@ Also: the `error(deg)` column reads ~0° the whole run (only −X lit), so the t
 - [ ] Command 13: CSV `mcu time(ms)` should still step by 20 ms (the loop isn't overrunning)
 - [ ] Command 13 for 2 min with video: within ±5°? `aim` alternates ±3 and the heading actually reaches each aim point (`err_ctrl` swings through 0)
 - [ ] If it chatters near the sun (wheel stall at ~45–50 RPM), raise `db` to 1.5 at runtime (command 14)
+
+## 2026-11-02: Disturbance fans (command 17) and thrust/torque model
+
+**Goal:** four LD3007MS fans (y = ±32 cm; upper pair on GPIO 27 faces −X, lower pair on GPIO 4 faces +X) add a known Z disturbance torque so we can measure how long the reaction wheel holds pointing.
+**Changed:**
+- `definitions.h`: `FAN_*` settings (pins 27/4, LEDC channels 0/2, 25 Hz PWM, 500 ms start kick, fans on 10 s after the sun is found, stop 10 s after saturation).
+- `main.cpp`: `set_fans()`, `start_fans()`, command 17 `fan_control()` (`u`, `l`, `both`, `off`, `freq`). Command 13 turns the fans on after the first scan + 10 s, logs `fan_upper(%)`, `fan_lower(%)`, telemetry `fanU`/`fanL`, prints `[RESULT] Wheel saturated N s after the fans turned on`, and ends 10 s after saturation. Every command 13 exit and command 0 also stop the fans. Command 14 adds `dur` (command 13 length, s).
+- `analysis/fan_thrust_model.py`: fan-law thrust/torque/saturation-time curves (proxy datasheet CFM-3007CF-085-264; no LD3007MS data published) and `--csv` to measure the real torque from the wheel speed slope (fans on minus fans off).
+**Agent verified (no hardware):** PlatformIO build succeeds; GPIO 4/27 are not used by the sun sensor (A0–A3 = 26, 25, 34, 39). The `--csv` torque estimate recovers a synthetic 5 RPM/s slope exactly (1.833 mN·m).
+**Theory (per pair, 100%):** 3.1–6.1 mN·m if the pair is a couple about Z → wheel saturates in ~24–48 s from 0 RPM; ~95–190 s at 60%.
+**We must verify on hardware:**
+- [ ] Which way each fan blows: the +Y and −Y fans of one pair must push opposite ways, or their Z torques cancel
+- [ ] Command 17: lowest duty that keeps the fans spinning (set `D0` in the model); try `freq 20000` if 25 Hz is rough
+- [ ] XY-MOS modules stay cool at 3.3 V gate drive (0.4 A per module)
+- [ ] 5 V supply holds up with the wheel + 0.8 A of fans
+- [ ] Command 13 with `dur 300` and fans at 0 (baseline), then e.g. 60%, 80%, 100%
+
+## 2026-11-02: Fans didn't spin: 3.3 V can't fully turn on the XY-MOS
+
+**Found (hardware):** command 17 at `both 100`: XY-MOS LEDs lit, fans spin when wired straight to the 5 V rail, but only 2.2 V across OUT+/OUT−. The D4184 MOSFETs are only partly on with a 3.3 V trigger.
+**Changed (team chose to keep the XY-MOS):** a 2N2222 in front of each trigger (GPIO → 2.2 kΩ → base, emitter → GND, collector → TRIG, 220 Ω TRIG → 5 V). This flips the signal, so:
+- `definitions.h`: `FAN_PWM_INVERTED 1`.
+- `main.cpp` `set_fans()`: inverts the duty when `FAN_PWM_INVERTED`; fan PWM setup moved to the very top of `setup()` (before the Serial wait) so the fans stop as soon as the board boots.
+**Agent verified (no hardware):** PlatformIO build succeeds; `ledcWrite` treats 1023 as a true 100% (pin held high), so "fans off" is a steady high.
+**We must verify on hardware:**
+- [ ] `both 100`: OUT+ to OUT− ≥ 4.7 V (if lower, use a smaller pull-up, e.g. 150 Ω)
+- [ ] `off` / `done`: fans stop and OUT ≈ 0 V
+- [ ] Fans run at full speed during upload/reset until `setup()` starts (expected with this circuit)
+
+## 2026-11-02: Back to direct GPIO → XY-MOS (no transistor or resistors available)
+
+**Changed:** `FAN_PWM_INVERTED` 1 → 0 (the 2N2222 stage was never built; with 1 the fans were backwards and only half-on at "off", which looked like "sometimes works"). Fan pins set to the strongest drive (`GPIO_DRIVE_CAP_3`) so the trigger LED doesn't pull the gate voltage below 3.3 V.
+**Agent verified (no hardware):** PlatformIO build succeeds.
+**We must verify on hardware:**
+- [ ] `both 100`: measure OUT+ to OUT− again (was 2.2 V) and TRIG to GND (should be ≈ 3.3 V)
+- [ ] Do the fans start by themselves at `both 100`, or need a flick of the blade?
+- [ ] Use the wheel-slope torque from `fan_thrust_model.py --csv`, not the 5 V theory table
+
+## 2026-11-02: Diagonal fan pairs + command 18 fan torque sweep
+
+**Found (hardware):** each pin drove two fans blowing the same way at +Y and −Y, so their Z torques cancelled at any duty. The team rewired the fans diagonally: GPIO 27 (`u`) now twists KestrelSAT clockwise seen from above, GPIO 4 (`l`) counter-clockwise. With the weak 3.3 V drive, fans at 100% sometimes cut out; 50% ran reliably.
+**Changed:**
+- `main.cpp`: command 18 `fan_sweep()`: gyro bias → for each duty 0–100% (10% steps), GPIO 27 pair then GPIO 4 pair. SETTLE (fans off, `rate_step(0)` stops the body with the wheel) → ON 4 s (wheel at constant PWM). Torque = I_BODY_Z·(least-squares gyro-rate slope) + I_WHEEL·(wheel accel from encoder counts, 2nd half vs 1st half of the window), fitted from 1.5 s to 4 s. `[RESULT]` line per step + table; logs `FanSweep_dataNNN.csv` (heading, rate, smoothed accel, wheel cmd/meas, encoder count).
+- Pair labels: prints and CSV/telemetry renamed to GPIO 27 / GPIO 4 (`fan_gpio27(%)`, `fan_gpio4(%)`, `fan27`, `fan4`); `definitions.h` `FAN_SWEEP_*`.
+- `analysis/plot_fansweep.py` (new): recomputes the torques from the raw log, plots |torque| vs duty per pair over the 5 V theory band, plus heading/rate/accel with the ON steps shaded. `fan_thrust_model.py` reads the renamed columns.
+**Agent verified (no hardware):** PlatformIO build succeeds. On a synthetic sweep (gyro noise 0.3 °/s, encoder-quantised wheel with a random drift each step, 0.5 s start kick) the torque is recovered within 0.05 mN·m worst / 0.015 mean of a 1 mN·m signal. The first version fitted the 50 ms wheel RPM readings and was off by up to 0.5 mN·m, so it was switched to encoder counts.
+**We must verify on hardware:**
+- [ ] Command 18: GPIO 27 steps read negative (CW), GPIO 4 positive (CCW). If both are backwards, `gsign` is wrong
+- [ ] SETTLE stops the body in < 20 s between steps (no "[CAUTION] Body still turning")
+- [ ] Wheel speed stays well inside ±400 RPM over the sweep
+- [ ] At 100% the fans may cut out (stall protection); a sudden drop in torque at the top duties means that happened
+- [ ] String twist: large steps turn up to ~40°, so the top-duty torques may read a little low
+
+## 2026-11-02: FanSweep_data001 (first command 18 run): not usable, fix deferred
+
+**Found:**
+- Fans sag the shared 5 V rail, so the open-loop wheel slows when they switch on (−4 RPM at 20% up to −22 RPM at 100%) and speeds back up when they stop. That swaps momentum with the body: every step, both pairs, kicked KestrelSAT clockwise (turned −1° to −22°, rate jumps then stays flat). Total heading drift −247° ≈ the sum of those kicks.
+- Real fan torque (weak 3.3 V XY-MOS drive) looks like ~0.1–0.3 mN·m, about the same as the per-step noise (gyro jitter ±2–3 °/s, not the 0.3 °/s assumed in the synthetic test).
+- "Body still turning" every step: the 1 °/s settle threshold is below the gyro jitter.
+- Steady ~0.2 mN·m clockwise background torque with fans off (wheel drifted −30 → −315 RPM over 9 min).
+- `I_BODY_Z` 0.014 predates the ±32 cm fan arms; the kick sizes suggest the real value is larger.
+**Decision (team):** fix command 18 later, and run it with the reaction wheel OFF (removes the rail-sag kick). Needs: a way to settle between steps without the wheel (wait for the string), a heading-based fit (less noisy than rate), a fans-off baseline per step, and a re-measured I_BODY_Z.
+**Changed:** nothing.
+
+## 2026-11-02: Command 19 fan hold test
+
+**Goal:** measure how long KestrelSAT keeps the ±10° pointing requirement, and when the wheel saturates, with one fan pair on (CW or CCW).
+**Changed:**
+- `main.cpp`: `sun_track(hold_trigger, fan_u_pct, fan_l_pct)`: command 13 calls it with the command 17 duties and its old timing (unchanged behaviour). Command 19 `fan_hold_test()` asks `cw`/`ccw` [+ duty, default 100%] and calls it with `hold_trigger = true`: the fans turn on once |gyro heading − sun heading| ≤ 10° for 10 s straight. Prints `[RESULT]` when pointing first leaves ±10° and when the wheel saturates, and a summary on every exit (time to lose pointing, % of fan-on time inside the band). Runs up to 20 min (`FAN_HOLD_DURATION_MS`), ends 10 s after saturation (as 13).
+- `definitions.h`: `FAN_HOLD_BAND_DEG` 10, `FAN_HOLD_TIME_MS` 10000, `FAN_HOLD_DURATION_MS` 1200000.
+**Agent verified (no hardware):** PlatformIO build succeeds.
+**We must verify on hardware:**
+- [ ] Command 19 `ccw`: fans start only after the LED has been green ~10 s; `[INFO] Disturbance fans ON` printed
+- [ ] Expect a small clockwise kick when the fans start (5 V rail sag slows the wheel, see FanSweep_data001); the tracker should pull it back
+- [ ] "Saturated" is the commanded wheel speed hitting ±400 RPM; with the rail sag the real wheel (wMeas) runs ~20 RPM slower, so check wMeas too
+- [ ] Repeat with `cw`
+
+## 2026-11-02: Graphs for the 2 Nov runs (fan hold results)
+
+**Data:** `3. DATA/2. After PDR/Data for 02NOV2026`: SunTrack_data016–018 (command 13, fans off), 019 (command 19 CW 100%), 020 (command 19 CCW 100%), FanSweep_data001.
+**Found:**
+- 019 CW: pointing 100% within ±10° (worst 7.7°) until the wheel saturated 51.5 s after fans on; pointing lost at 55.1 s. Wheel −6.27 RPM/s = 2.30 mN·m.
+- 020 CCW: 100% within ±10° (worst 3.7°), saturated 49.5 s, pointing lost 52.7 s. Wheel +6.86 RPM/s = 2.51 mN·m.
+- Fans-off baselines: −0.20 to −0.34 mN·m (CW) background. Averaging CW/CCW instead gives +0.11 mN·m, so the per-pair fan torque is 2.0–2.8 mN·m depending on which background is right (repeat runs needed).
+- The fans started with the wheel near 0 RPM, so only half the wheel's range (0 → ±400) was used.
+- The command 18 sweep is >10× off (it suggested ~0.2 mN·m), confirming it measured the rail-sag kick, not the fans.
+- Command 18 log quirk: each step's last ON row has the next step number and pin 0 (step counter advances before logging). The analysis scripts now skip those rows; firmware left as is (command 18 is being redesigned).
+**Changed:** `analysis/fan_hold_report.py` (new): pointing / wheel / timeline graphs aligned to fan-on, fans-off baselines, sweep rail-sag check, per-run `plot_suntrack` overviews, `summary.csv` + `summary.md`. `plot_fansweep.py` skips the pin-0 ON rows.
+**Output:** `3. DATA/2. After PDR/Graphs/02NOV2026/`.

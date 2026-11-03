@@ -14,10 +14,11 @@
 - XBee: HardwareSerial(2), 9600 baud. ICM-20948 IMU and MAX17048 gauge on I2C.
 - Sun sensor: A0 = +X, A1 = +Y, A2 = −X, A3 = −Y (3.3 V, 3.3 kΩ).
 - TB9051FTG motor driver PWM1 = 33, PWM2 = 15. Encoder A = 14, B = 32. Motor supply 5 V.
+- Disturbance fans (4× LD3007MS via XY-MOS, GPIO straight to TRIG, so only partly on): wired in diagonal pairs. GPIO 27 (`u`) = clockwise from above, GPIO 4 (`l`) = counter-clockwise (LEDC channels 0 and 2).
 - Pin map: `include/definitions.h`.
 
 ## Conventions
-- Commands are dispatched in `process_main_menu()`. Lab 8 uses 10–16.
+- Commands are dispatched in `process_main_menu()`. Lab 8 uses 10–19.
 - Telemetry format is `Name:value,Name:value`. Mirror every XBee message to Serial (`print_both()`).
 - Sun direction: 0° = +X, counter-clockwise (+Z) positive. Error = wrap180(sun_dir − array_axis).
 - Wheel speed is positive when spinning about +Z. Convert to PWM with `wheel_pwm_sign`.

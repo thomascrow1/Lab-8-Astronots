@@ -51,6 +51,9 @@
  * | 14  | Lab 8: Print / set sun tracker parameters |
  * | 15  | Lab 8: Attitude determination check (sun sensor + gyro, PASS/FAIL) |
  * | 16  | Lab 8: Phototransistor resistor sweep (logs to SD) |
+ * | 17  | Lab 8: Disturbance fans (set speeds for command 13, bench test) |
+ * | 18  | Lab 8: Fan torque sweep (0-100% each pair, measures torque, logs to SD) |
+ * | 19  | Lab 8: Fan hold test (sun tracker + fans once on target; time to lose pointing / saturate) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -97,6 +100,7 @@
 #include <SparkFun_MAX1704x_Fuel_Gauge_Arduino_Library.h> // MAX17048 fuel gauge
 #include <ICM_20948.h>                                    // Sparkfun IMU library
 #include <TB9051FTGMotorCarrier.h>                        // Pololu Motor Carrier Library
+#include "driver/gpio.h"                                  // gpio_set_drive_capability() for the fan pins
 #include <ESP32Encoder.h>                                 // Motor encoder library to measure wheel speed
 #include "sun_tracker.h"                                  // Lab 8 sun tracker math (this directory)
 
@@ -140,6 +144,13 @@ float array_axis_deg = SOLAR_ARRAY_AXIS_DEG;
 float bias_pwm = DEFAULT_BIAS_PWM;
 int wheel_pwm_sign = DEFAULT_WHEEL_PWM_SIGN;
 int gyro_sign = DEFAULT_GYRO_SIGN;
+uint32_t track_duration_ms = TRACK_DURATION_MS; // command 13 length, set with 'dur' in command 14
+// Disturbance fans (command 17):
+float fan_test_upper_pct = 0.0;  // duty command 13 turns the GPIO 27 pair on to
+float fan_test_lower_pct = 0.0;  // duty command 13 turns the GPIO 4 pair on to
+float fan_upper_pct = 0.0;       // duty the GPIO 27 pair is running at right now
+float fan_lower_pct = 0.0;       // duty the GPIO 4 pair is running at right now
+uint32_t fan_freq_hz = FAN_PWM_FREQ_HZ;
 
 /*---------------------------------------------------------------------------------------------*/
 // Function Prototypes (see defintiions after loop()):
@@ -165,17 +176,33 @@ bool abort_requested();
 void sun_calibrate();
 void sun_stream();
 void sun_sign_check();
-void sun_track();
+void sun_track(bool hold_trigger, float fan_u_pct, float fan_l_pct);
+void fan_hold_test();
 void sun_set_params();
 void sun_print_params();
 void sample_sun_stats(int n, float mean[4], float sd[4]);
 void ad_check();
 void pt_sweep();
+void set_fans(float upper_pct, float lower_pct);
+void start_fans(float upper_pct, float lower_pct);
+void fan_control();
+void fan_sweep();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
 /////////////////////////////////////////////////////////////////////////////////////////////////
 void setup() {
+  // Disturbance fans off FIRST, before waiting for the Serial monitor.
+  ledcSetup(FAN_UPPER_LEDC_CH, fan_freq_hz, FAN_PWM_BITS);
+  ledcSetup(FAN_LOWER_LEDC_CH, fan_freq_hz, FAN_PWM_BITS);
+  ledcAttachPin(FAN_UPPER_PIN, FAN_UPPER_LEDC_CH);
+  ledcAttachPin(FAN_LOWER_PIN, FAN_LOWER_LEDC_CH);
+  // Strongest pin drive (~40 mA): the XY-MOS trigger LED loads the pin, and every bit of gate voltage
+  // helps a MOSFET that 3.3 V only half-opens.
+  gpio_set_drive_capability((gpio_num_t)FAN_UPPER_PIN, GPIO_DRIVE_CAP_3);
+  gpio_set_drive_capability((gpio_num_t)FAN_LOWER_PIN, GPIO_DRIVE_CAP_3);
+  set_fans(0, 0);
+
   Serial.begin(115200); // Begin Serial communication with computer
   while (!Serial) {delay(10);} // Wait for user to open Serial monitor before proceeding
   Serial.println("[INFO] Hello World!");
@@ -246,6 +273,7 @@ void setup() {
   enc.attachFullQuad(ENCODER_PIN_A, ENCODER_PIN_B); // Motor Encoder
   enc.clearCount();
   //----------------------------------------------
+
 
   Serial.println("[INFO] SETUP COMPLETE.");
   Xbee.println("[INFO] SETUP COMPLETE.SEND '1' FOR OPTIONS.");
@@ -343,7 +371,7 @@ int get_command_from_ground_station()
  * - 7: Run Lab 7 - Test A (tabletop static test)
  * - 8: Run Lab 7 - Test B
  * - 9: Stream reaction wheel speed
- * - 10-16: Lab 8 sun tracker commands (see sun tracker section below)
+ * - 10-19: Lab 8 sun tracker commands (see sun tracker section below)
  * - 98: SD Card - List files (USB Serial only)
  * - 99: SD Card - Print file menu (USB Serial only)
  *
@@ -362,12 +390,13 @@ void process_main_menu() {
   switch (received_int) {
     case 0:
       driver.setOutput(0);
-      Xbee.println("Motor Stopped.");
-      Serial.println("Motor Stopped.");
+      set_fans(0, 0);
+      Xbee.println("Motor and fans stopped.");
+      Serial.println("Motor and fans stopped.");
       break;
     
     case 1:
-      Xbee.print("0 - Stop reation wheel\n");
+      Xbee.print("0 - Stop reation wheel and fans\n");
       Xbee.print("1 - Print Options Menu\n");
       Xbee.print("2 - Get RSSI\n");
       Xbee.print("3 - Toggle LED\n");
@@ -384,10 +413,13 @@ void process_main_menu() {
       Xbee.print("14 - Lab 8: Print/Set Tracker Parameters\n");
       Xbee.print("15 - Lab 8: Attitude Determination Check\n");
       Xbee.print("16 - Lab 8: Phototransistor Resistor Sweep\n");
+      Xbee.print("17 - Lab 8: Disturbance Fans\n");
+      Xbee.print("18 - Lab 8: Fan Torque Sweep\n");
+      Xbee.print("19 - Lab 8: Fan Hold Test (CW/CCW)\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
-      Serial.print("0 - Stop reation wheel\n");
+      Serial.print("0 - Stop reation wheel and fans\n");
       Serial.print("1 - Print Options Menu\n");
       Serial.print("2 - Get RSSI\n");
       Serial.print("3 - Toggle LED\n");
@@ -404,6 +436,9 @@ void process_main_menu() {
       Serial.print("14 - Lab 8: Print/Set Tracker Parameters\n");
       Serial.print("15 - Lab 8: Attitude Determination Check\n");
       Serial.print("16 - Lab 8: Phototransistor Resistor Sweep\n");
+      Serial.print("17 - Lab 8: Disturbance Fans\n");
+      Serial.print("18 - Lab 8: Fan Torque Sweep\n");
+      Serial.print("19 - Lab 8: Fan Hold Test (CW/CCW)\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -456,7 +491,7 @@ void process_main_menu() {
       break;
 
     case 13:
-      sun_track();
+      sun_track(false, fan_test_upper_pct, fan_test_lower_pct);
       break;
 
     case 14:
@@ -469,6 +504,18 @@ void process_main_menu() {
 
     case 16:
       pt_sweep();
+      break;
+
+    case 17:
+      fan_control();
+      break;
+
+    case 18:
+      fan_sweep();
+      break;
+
+    case 19:
+      fan_hold_test();
       break;
 
     case 98:
@@ -1623,18 +1670,27 @@ void sun_sign_check() {
  *                                          orange outside. Sequential lobing (aim +/-LOBE_AMP_DEG, compare
  *                                          -X brightness) keeps nudging the sun heading to correct drift.
  *                                          If -X gets very dim while pointed there -> ACQUIRE again
- *  - no sun found in a scan    : wheel stopped, warning sent, test ends
- *  - TRACK_DURATION_MS or 'X'  : wheel stopped, test ends
+ *  - Disturbance fans (only if a duty > 0 is passed in):
+ *      command 13 (hold_trigger false): on FAN_START_DELAY_MS after the first scan finds the sun
+ *      command 19 (hold_trigger true) : on once pointing has stayed within FAN_HOLD_BAND_DEG for
+ *                                       FAN_HOLD_TIME_MS; reports when pointing first leaves the band
+ *    With fans on, the test ends once the wheel has been saturated for FAN_SAT_STOP_MS.
+ *  - no sun found in a scan    : wheel and fans stopped, warning sent, test ends
+ *  - track_duration_ms or 'X'  : wheel and fans stopped, test ends ('dur' in command 14 sets the length;
+ *                                command 19 runs up to FAN_HOLD_DURATION_MS)
  * The gyro bias is measured while KestrelSAT is held (SPINUP/HOLD) and removed from the heading.
+ * @param hold_trigger  false = command 13 fan timing, true = command 19 (fans on after holding the band)
+ * @param fan_u_pct     GPIO 27 pair duty once the fans turn on (0-100)
+ * @param fan_l_pct     GPIO 4 pair duty once the fans turn on (0-100)
  */
 static SunScan sun_scan;  // ~5 KB, kept off the stack
-void sun_track() {
+void sun_track(bool hold_trigger, float fan_u_pct, float fan_l_pct) {
   char file_name[40];
   if (sd_createDataFile(&dataFile, "SunTrack")) {
     dataFile.println("mcu time(ms),mode,sun_plusX(count),sun_plusY(count),sun_minusX(count),sun_minusY(count),"
                      "sun_mag,sun_direction(deg),error(deg),body_rate(deg/s),mag_X(uT),mag_Y(uT),"
                      "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated,err_ctrl(deg),latch,"
-                     "heading(deg),sun_heading(deg),aim_offset(deg),mx_bright");
+                     "heading(deg),sun_heading(deg),aim_offset(deg),mx_bright,fan_gpio27(%),fan_gpio4(%)");
     dataFile.flush();
     dataFile.getName(file_name, sizeof(file_name));
     print_both(String("[INFO] Data file created successfully: ") + file_name);
@@ -1677,6 +1733,39 @@ void sun_track() {
   uint32_t last_saturation_warning = 0;
   bool release_announced = false;
   int test_point_count = 0;
+  const uint32_t duration_ms = hold_trigger ? FAN_HOLD_DURATION_MS : track_duration_ms;
+  bool fans_wanted = fan_u_pct > 0 || fan_l_pct > 0;
+  bool fans_on = false;
+  uint32_t fan_start_at = 0;       // millis() when the fans turn on (0 = not scheduled yet)
+  uint32_t fan_kick_until = 0;     // millis() when the 100% start-up kick ends
+  uint32_t fan_on_t = 0;           // test time (ms) the fans turned on
+  bool fan_sat_reported = false;
+  float err_point = 999.0;         // pointing error (deg) the requirement is judged on: gyro heading vs sun heading
+  uint32_t in_band_since = 0;      // command 19: millis() pointing entered the band (0 = outside)
+  uint32_t fan_band_lost_t = 0;    // test time (ms) pointing first left the band after the fans turned on
+  uint32_t fan_band_ms = 0;        // total time inside the band since the fans turned on
+  set_fans(0, 0);
+  if (fans_wanted && !hold_trigger) {
+    print_both(String("[INFO] Disturbance fans will turn on ") + (FAN_START_DELAY_MS / 1000) +
+               " s after the sun is found (GPIO 27 " + String(fan_u_pct, 0) + "%, GPIO 4 " +
+               String(fan_l_pct, 0) + "%). Test length " + (duration_ms / 1000) + " s.");
+  } else if (fans_wanted) {
+    print_both(String("[INFO] Disturbance fans will turn on after ") + (FAN_HOLD_TIME_MS / 1000) + " s within +/-" +
+               String(FAN_HOLD_BAND_DEG, 0) + " deg (GPIO 27 " + String(fan_u_pct, 0) + "%, GPIO 4 " +
+               String(fan_l_pct, 0) + "%). Runs until the wheel saturates (max " + (duration_ms / 60000) + " min).");
+  }
+  // Command 19 summary, printed on every way the test ends.
+  auto print_hold_summary = [&](uint32_t t_end) {
+    if (!hold_trigger) return;
+    if (!fans_on) { print_both("[RESULT] Fans never turned on (pointing never held the band long enough)."); return; }
+    float on_s = (t_end - fan_on_t) / 1000.0;
+    print_both(String("[RESULT] Fans on for ") + String(on_s, 1) + " s. Pointing " +
+               (fan_band_lost_t ? String("first left +/-") + String(FAN_HOLD_BAND_DEG, 0) + " deg after " +
+                                  String((fan_band_lost_t - fan_on_t) / 1000.0, 1) + " s"
+                                : String("never left the band")) +
+               "; inside the band " + String(on_s > 0 ? 100.0 * fan_band_ms / (on_s * 1000.0) : 0.0, 0) +
+               "% of the time. Wheel " + (fan_sat_reported ? "saturated (see above)." : "did not saturate."));
+  };
 
   uint32_t t0 = millis();
   uint32_t tLastControl = t0;
@@ -1687,8 +1776,10 @@ void sun_track() {
   while (true) {
     if (abort_requested()) {
       driver.setOutput(0);
+      set_fans(0, 0);
       dataFile.close();
-      print_both(String("[CAUTION] Test stopped by user. Wheel stopped. File ") + file_name + " closed.");
+      print_both(String("[CAUTION] Test stopped by user. Wheel and fans stopped. File ") + file_name + " closed.");
+      print_hold_summary(millis() - t0);
       return;
     }
 
@@ -1740,16 +1831,19 @@ void sun_track() {
 
       if (acquiring) {
         mode = "ACQUIRE";
+        err_point = 999.0;  // scanning: not pointed at anything
         neopixelWrite(RGB_BUILTIN, 128, 0, 128); // purple: scanning
         tau = rate_step(SCAN_RATE_DPS, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
         bool done = scan_add(sun_scan, heading, mx_bright, SCAN_TURN_DEG);
         if (done || now - scan_t0 > SCAN_TIMEOUT_MS) {
           if (!scan_result(sun_scan, SCAN_PEAK_FRACTION, SUN_LOST_THRESHOLD, sun_heading, sun_peak)) {
             driver.setOutput(0);
+            set_fans(0, 0);
             dataFile.close();
             neopixelWrite(RGB_BUILTIN, 255, 0, 0); // red
             print_both(String("[WARN] No sun found in the scan (brightest -X ") + String(sun_peak, 2) +
                        "). Wheel stopped. File " + file_name + " closed.");
+            print_hold_summary(t);
             return;
           }
           if (!done) print_both("[CAUTION] Scan timed out before a full turn; using what was seen.");
@@ -1764,6 +1858,7 @@ void sun_track() {
       } else {
         mode = "TRACK";
         float err_gyro = wrap180(sun_heading - heading);           // how far the array is from the sun heading
+        err_point = err_gyro;
         float err_aim = wrap180(sun_heading + aim_offset - heading); // how far from this lobe's aim point
         bool settled = fabs(err_aim) < LOBE_SETTLED_DEG && fabs(rate) < LOBE_SETTLED_DPS;
         aim_offset = lobe_step(lobe, mx_bright, settled, dt_s, LOBE_AMP_DEG, LOBE_DWELL_MS / 1000.0,
@@ -1802,6 +1897,53 @@ void sun_track() {
       saturated_since = 0;
     }
 
+    // Disturbance fans. Command 13: on FAN_START_DELAY_MS after the first scan has found the sun.
+    // Command 19: on once pointing has stayed inside the band for FAN_HOLD_TIME_MS.
+    bool in_band = fabs(err_point) <= FAN_HOLD_BAND_DEG;
+    if (in_band) { if (in_band_since == 0) in_band_since = now; }
+    else in_band_since = 0;
+    if (fans_wanted && fan_start_at == 0) {
+      if (!hold_trigger && control_started && !acquiring) fan_start_at = now + FAN_START_DELAY_MS;
+      if (hold_trigger && in_band_since != 0 && now - in_band_since >= FAN_HOLD_TIME_MS) fan_start_at = now;
+    }
+    if (fans_wanted && !fans_on && fan_start_at != 0 && now >= fan_start_at) {
+      fans_on = true;
+      fan_on_t = t;
+      set_fans(fan_u_pct > 0 ? 100 : 0, fan_l_pct > 0 ? 100 : 0); // kick so low duties start
+      fan_kick_until = now + FAN_KICK_MS;
+      print_both(String("[INFO] Disturbance fans ON at t=") + t + " ms (GPIO 27 " + String(fan_u_pct, 0) +
+                 "%, GPIO 4 " + String(fan_l_pct, 0) + "%), wMeas " + String(w_meas, 0) + " RPM.");
+    }
+    if (fan_kick_until != 0 && now >= fan_kick_until) {
+      fan_kick_until = 0;
+      set_fans(fan_u_pct, fan_l_pct);
+    }
+    // Command 19: how long pointing stays inside the band with the fans on.
+    if (hold_trigger && fans_on) {
+      if (in_band) fan_band_ms += interval_testPoint;
+      else if (fan_band_lost_t == 0) {
+        fan_band_lost_t = t;
+        print_both(String("[RESULT] Pointing left +/-") + String(FAN_HOLD_BAND_DEG, 0) + " deg " +
+                   String((t - fan_on_t) / 1000.0, 1) + " s after the fans turned on (error " +
+                   String(err_point > 900 ? 999.0 : err_point, 1) + " deg, wMeas " + String(w_meas, 0) + " RPM).");
+      }
+    }
+    // With the fans on, a saturated wheel means pointing can't be held any more: report it, then end the test.
+    if (fans_on && saturated && !fan_sat_reported) {
+      fan_sat_reported = true;
+      print_both(String("[RESULT] Wheel saturated ") + String((t - fan_on_t) / 1000.0, 1) +
+                 " s after the fans turned on (wMeas " + String(w_meas, 0) + " RPM).");
+    }
+    if (fans_on && saturated_since != 0 && now - saturated_since > FAN_SAT_STOP_MS) {
+      driver.setOutput(0);
+      set_fans(0, 0);
+      dataFile.close();
+      print_both(String("[INFO] Wheel saturated for ") + (FAN_SAT_STOP_MS / 1000) +
+                 " s with the fans on. Test ended. Wheel and fans stopped. File " + file_name + " closed.");
+      print_hold_summary(t);
+      return;
+    }
+
     // Log to SD:
     dataFile.print(t);                            dataFile.print(",");
     dataFile.print(mode);                         dataFile.print(",");
@@ -1824,7 +1966,9 @@ void sun_track() {
     dataFile.print(heading, 2);                   dataFile.print(",");
     dataFile.print(sun_heading, 2);               dataFile.print(",");
     dataFile.print(aim_offset, 1);                dataFile.print(",");
-    dataFile.println(mx_bright, 3);
+    dataFile.print(mx_bright, 3);                 dataFile.print(",");
+    dataFile.print(fan_upper_pct, 0);             dataFile.print(",");
+    dataFile.println(fan_lower_pct, 0);
 
     // Telemetry (Name:value for GCS plotter): every point on USB, 2 Hz on XBee
     String s = "t:" + String(t) + ",err:" + String(err, 1) + ",latch:" + String(latch.dir) + ",hdg:" + String(heading, 1) +
@@ -1835,7 +1979,8 @@ void sun_track() {
                // same sun sensor fields as command 11, so the GCS Sun Map works during tracking
                ",mag:" + String(sun.magnitude, 2) +
                ",n+X:" + String(sun.norm[SUN_PX], 2) + ",n+Y:" + String(sun.norm[SUN_PY], 2) +
-               ",n-X:" + String(sun.norm[SUN_MX], 2) + ",n-Y:" + String(sun.norm[SUN_MY], 2);
+               ",n-X:" + String(sun.norm[SUN_MX], 2) + ",n-Y:" + String(sun.norm[SUN_MY], 2) +
+               ",fan27:" + String(fan_upper_pct, 0) + ",fan4:" + String(fan_lower_pct, 0);
     Serial.println(s);
     if (test_point_count % 10 == 0) {
       dataFile.flush(); // save file every 10 test points
@@ -1843,10 +1988,12 @@ void sun_track() {
     }
 
     // End test if complete:
-    if (t > TRACK_DURATION_MS) {
+    if (t > duration_ms) {
       driver.setOutput(0);
+      set_fans(0, 0);
       dataFile.close();
-      print_both(String("[INFO] Sun tracker test complete. Wheel stopped. File ") + file_name + " closed.");
+      print_both(String("[INFO] Sun tracker test complete. Wheel and fans stopped. File ") + file_name + " closed.");
+      print_hold_summary(t);
       return;
     }
   }
@@ -1862,7 +2009,8 @@ void sun_print_params() {
   print_both(String("kp=") + String(tracker_gains.Kp, 5) + " kd=" + String(tracker_gains.Kd, 5) +
              " db=" + String(tracker_gains.deadband_deg, 1) + " rate=" + String(tracker_gains.max_rate_dps, 0) +
              " bias=" + String(bias_pwm, 2) +
-             " axis=" + String(array_axis_deg, 1) + " wsign=" + wheel_pwm_sign + " gsign=" + gyro_sign);
+             " axis=" + String(array_axis_deg, 1) + " wsign=" + wheel_pwm_sign + " gsign=" + gyro_sign +
+             " dur=" + (track_duration_ms / 1000));
   String cal = "cal dark/bright (+X,+Y,-X,-Y): ";
   for (int i = 0; i < 4; i++) cal += String(sun_cal.dark[i], 0) + "/" + String(sun_cal.bright[i], 0) + " ";
   print_both(cal);
@@ -1875,7 +2023,7 @@ void sun_print_params() {
  */
 void sun_set_params() {
   sun_print_params();
-  print_both("[INFO] Send '<name> <value>' (names: kp kd db rate bias axis wsign gsign). Send 'done' to finish.");
+  print_both("[INFO] Send '<name> <value>' (names: kp kd db rate bias axis wsign gsign dur). Send 'done' to finish.");
   while (true) {
     String line = wait_for_line();
     line.toLowerCase();
@@ -1894,6 +2042,7 @@ void sun_set_params() {
     else if (name == "axis")  array_axis_deg = value;
     else if (name == "wsign") wheel_pwm_sign = (value < 0) ? -1 : 1;
     else if (name == "gsign") gyro_sign = (value < 0) ? -1 : 1;
+    else if (name == "dur")   track_duration_ms = (uint32_t)(constrain(value, 30, 3600) * 1000); // seconds
     else { print_both("[CAUTION] Unknown parameter: " + name); continue; }
     sun_print_params();
   }
@@ -2198,4 +2347,352 @@ void pt_sweep() {
     print_both("[INFO] Sweep finished.");
   }
   print_both("[INFO] After installing the resistor you pick, re-run 10 (calibrate) and paste the new sun_cal line.");
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8 Command 17: Disturbance Fans
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Set the PWM duty of the two fan pairs right now (0-100%). Fans can't run backwards,
+ *        so negative values are treated as 0. Updates fan_upper_pct / fan_lower_pct.
+ *        With FAN_PWM_INVERTED the GPIO duty is flipped, because the transistor in front of each
+ *        XY-MOS trigger turns the fans on when the GPIO is low.
+ */
+void set_fans(float upper_pct, float lower_pct) {
+  fan_upper_pct = constrain(upper_pct, 0.0, 100.0);
+  fan_lower_pct = constrain(lower_pct, 0.0, 100.0);
+  const float full = (1 << FAN_PWM_BITS) - 1;  // ledcWrite treats this as 100% (pin stays high)
+  uint32_t upper = (uint32_t)(fan_upper_pct / 100.0 * full + 0.5);
+  uint32_t lower = (uint32_t)(fan_lower_pct / 100.0 * full + 0.5);
+  if (FAN_PWM_INVERTED) {  // transistor flips the signal: GPIO high = fans off
+    upper = (uint32_t)full - upper;
+    lower = (uint32_t)full - lower;
+  }
+  ledcWrite(FAN_UPPER_LEDC_CH, upper);
+  ledcWrite(FAN_LOWER_LEDC_CH, lower);
+}
+
+/**
+ * @brief Spin the fans at the given duties, starting any pair that is at rest with a short
+ *        100% kick so low duties still spin up. Blocks for FAN_KICK_MS (only used in command 17).
+ */
+void start_fans(float upper_pct, float lower_pct) {
+  bool kick_upper = fan_upper_pct == 0 && upper_pct > 0;
+  bool kick_lower = fan_lower_pct == 0 && lower_pct > 0;
+  if (kick_upper || kick_lower) {
+    set_fans(kick_upper ? 100 : fan_upper_pct, kick_lower ? 100 : fan_lower_pct);
+    delay(FAN_KICK_MS);
+  }
+  set_fans(upper_pct, lower_pct);
+}
+
+/**
+ * @brief Set the fan duties that command 13 will use, and spin the fans now so you can check them.
+ *        Send lines like "u 60" (GPIO 27 pair), "l 60" (GPIO 4 pair), "both 60",
+ *        "off" (both 0), "freq 25" (PWM frequency, Hz). Send "done" (or 'X') to finish.
+ *        The fans stop when you finish; the duties are kept until reboot.
+ */
+void fan_control() {
+  print_both("[INFO] Disturbance fans: 'u' = GPIO 27 pair (clockwise), 'l' = GPIO 4 pair (counter-clockwise), duty 0-100%.");
+  print_both("[INFO] Send 'u <pct>', 'l <pct>', 'both <pct>', 'off', 'freq <Hz>', or 'done'.");
+  print_both("[INFO] Fans spin now so you can check them. Command 13 uses the same duties (0 = no fans).");
+  print_both(String("fan gpio27=") + String(fan_test_upper_pct, 0) + "% gpio4=" + String(fan_test_lower_pct, 0) +
+             "% freq=" + fan_freq_hz + " Hz");
+  start_fans(fan_test_upper_pct, fan_test_lower_pct);
+  while (true) {
+    String line = wait_for_line();
+    line.toLowerCase();
+    if (line == "done" || line == "x" || line.length() == 0) break;
+
+    if (line == "off") {
+      fan_test_upper_pct = 0;
+      fan_test_lower_pct = 0;
+    } else {
+      int space = line.indexOf(' ');
+      if (space < 0) { print_both("[CAUTION] Format is '<name> <value>', e.g. 'u 60'."); continue; }
+      String name = line.substring(0, space);
+      float value = line.substring(space + 1).toFloat();
+
+      if      (name == "u")    fan_test_upper_pct = constrain(value, 0.0, 100.0);
+      else if (name == "l")    fan_test_lower_pct = constrain(value, 0.0, 100.0);
+      else if (name == "both") { fan_test_upper_pct = constrain(value, 0.0, 100.0); fan_test_lower_pct = fan_test_upper_pct; }
+      else if (name == "freq") {
+        uint32_t f = (uint32_t)constrain(value, 10, 20000); // XY-MOS module is rated 0-20 kHz
+        if (ledcChangeFrequency(FAN_UPPER_LEDC_CH, f, FAN_PWM_BITS) == 0 ||
+            ledcChangeFrequency(FAN_LOWER_LEDC_CH, f, FAN_PWM_BITS) == 0) {
+          print_both("[CAUTION] That frequency can't be set.");
+          continue;
+        }
+        fan_freq_hz = f;
+      }
+      else { print_both("[CAUTION] Unknown setting: " + name); continue; }
+    }
+    start_fans(fan_test_upper_pct, fan_test_lower_pct);
+    print_both(String("fan gpio27=") + String(fan_test_upper_pct, 0) + "% gpio4=" + String(fan_test_lower_pct, 0) +
+               "% freq=" + fan_freq_hz + " Hz");
+  }
+  set_fans(0, 0);
+  print_both("[INFO] Fans off. Command 13 will use these duties.");
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8 Command 18: Fan Torque Sweep
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Least-squares slope of y vs t from running sums (n points). Returns 0 if there are too few points.
+ */
+float fit_slope(int n, double st, double sy, double stt, double sty) {
+  double den = n * stt - st * st;
+  if (n < 3 || den == 0) return 0.0;
+  return (float)((n * sty - st * sy) / den);
+}
+
+/**
+ * @brief Measure the Z torque each fan pair makes at each duty, with KestrelSAT hanging free.
+ *
+ * Order: gyro bias (hang still, wheel off) -> for each duty 0, 10, ... 100%: GPIO 27 pair, then GPIO 4 pair.
+ * Each step:
+ *  - SETTLE : fans off, the wheel damps the body rate to ~0 (rate_step with 0 deg/s)
+ *  - ON     : fans on at the duty for FAN_SWEEP_ON_MS, wheel held at a constant speed so it adds
+ *             (almost) no torque. Over the last part of the step (from FAN_SWEEP_FIT_START_MS):
+ *             body accel = least-squares slope of the gyro rate; wheel accel = change in average wheel
+ *             speed between the two halves, from raw encoder counts (the 50 ms RPM readings are too noisy).
+ *             torque = I_BODY_Z * body accel + I_WHEEL * wheel accel.
+ * Positive torque = counter-clockwise (+Z, seen from above). Prints one [RESULT] line per step and a table
+ * at the end; logs every point to FanSweep_dataNNN.csv. Send 'X' to stop.
+ * @note The string twist pushes back as KestrelSAT turns, so big torques read a little low.
+ */
+void fan_sweep() {
+  const int n_levels = 100 / FAN_SWEEP_STEP_PCT + 1;
+  const int n_steps = 2 * n_levels;
+  float tau_result[2][n_levels];  // [0] = GPIO 27 pair, [1] = GPIO 4 pair (N*m)
+  char file_name[40];
+
+  if (sd_createDataFile(&dataFile, "FanSweep")) {
+    dataFile.println("mcu time(ms),step,pin,duty(%),phase,heading(deg),body_rate(deg/s),body_accel(deg/s^2),"
+                     "w_RW_cmd(RPM),w_RW_meas(RPM),enc_count");
+    dataFile.flush();
+    dataFile.getName(file_name, sizeof(file_name));
+    print_both(String("[INFO] Data file created successfully: ") + file_name);
+  } else {
+    print_both("[ERROR] Failed to create data file. Aborting sweep.");
+    return;
+  }
+
+  print_both(String("[INFO] Fan torque sweep: ") + n_steps + " steps (0-100% in " + FAN_SWEEP_STEP_PCT +
+             "% steps, GPIO 27 pair then GPIO 4 pair). About " + (n_steps * 8 / 60 + 1) + " min.");
+  print_both("[INFO] Let KestrelSAT hang still, then send any key. Don't touch it during the sweep. Send 'X' to stop.");
+  if (wait_for_line().equalsIgnoreCase("x")) { dataFile.close(); print_both("[INFO] Sweep canceled."); return; }
+
+  enum { BIAS, SETTLE, ON } phase = BIAS;
+  float gyro_bias = 0.0;
+  float bias_sum = 0.0;
+  int bias_n = 0;
+  float heading = 0.0;
+  float prev_rate = 0.0;
+  float accel_f = 0.0;            // smoothed body accel (deg/s^2), for the log/telemetry only
+  float w_cmd_rpm = 0.0;
+  float w_prev_cmd_rpm = 0.0;
+  bool saturated = false;
+  int step = 0;
+  int pin = FAN_UPPER_PIN;
+  float duty = 0.0;
+  uint32_t phase_t0 = 0;
+  uint32_t still_since = 0;
+  uint32_t kick_until = 0;
+  float heading_on0 = 0.0;
+  // least-squares sums over the fit window (t in s from the start of the step)
+  int fit_n = 0;
+  double st = 0, stt = 0, sr = 0, str_ = 0;
+  // encoder count at the start, middle and end of the fit window (for the wheel accel)
+  const uint32_t fit_mid_ms = FAN_SWEEP_FIT_START_MS + (FAN_SWEEP_ON_MS - FAN_SWEEP_FIT_START_MS) / 2;
+  int64_t enc_c[3] = {0, 0, 0};
+  uint32_t enc_t[3] = {0, 0, 0};
+  int enc_marks = 0;
+  float rate = 0.0;
+  int test_point_count = 0;
+
+  set_fans(0, 0);
+  driver.setOutput(0);
+  uint32_t t0 = millis();
+  uint32_t tLast = t0;
+  timeNext_testPoint = t0;
+  measure_wheel_rpm(); // reset encoder timing
+  neopixelWrite(RGB_BUILTIN, 255, 255, 0); // yellow: measuring gyro bias, keep still
+
+  while (true) {
+    if (abort_requested()) {
+      driver.setOutput(0);
+      set_fans(0, 0);
+      dataFile.close();
+      print_both(String("[CAUTION] Sweep stopped by user. Wheel and fans stopped. File ") + file_name + " closed.");
+      return;
+    }
+
+    uint32_t now = millis();
+    if (now < timeNext_testPoint) continue;
+    timeNext_testPoint += interval_testPoint;
+    test_point_count++;
+    uint32_t t = now - t0;
+    float dt_s = (now - tLast) / 1000.0f;
+    tLast = now;
+
+    // Sense:
+    rate = read_body_rate_dps() - gyro_bias;
+    float w_meas = measure_wheel_rpm();
+    if (phase != BIAS) heading += rate * dt_s;
+    if (dt_s > 0) accel_f += ((rate - prev_rate) / dt_s - accel_f) * dt_s / (FAN_SWEEP_ACCEL_TAU_S + dt_s);
+    prev_rate = rate;
+
+    const char *phase_name = "BIAS";
+    if (phase == BIAS) {
+      bias_sum += rate;
+      bias_n++;
+      if (t >= FAN_SWEEP_BIAS_MS) {
+        gyro_bias = (bias_n > 0) ? bias_sum / bias_n : 0.0;
+        print_both(String("[INFO] Gyro bias ") + String(gyro_bias, 3) + " deg/s.");
+        phase = SETTLE;
+        phase_t0 = now;
+        still_since = 0;
+        accel_f = 0.0;
+        prev_rate = 0.0;
+      }
+    } else if (phase == SETTLE) {
+      phase_name = "SETTLE";
+      neopixelWrite(RGB_BUILTIN, 0, 0, 255); // blue: wheel stopping the body
+      rate_step(0.0, rate, dt_s, tracker_gains, wheel_limits, I_WHEEL, w_cmd_rpm, saturated);
+      set_wheel_rpm(motor_lag_comp(w_cmd_rpm, w_prev_cmd_rpm, dt_s, MOTOR_TAU_S, RPM_PER_PWM));
+      w_prev_cmd_rpm = w_cmd_rpm;
+
+      if (fabs(rate) < FAN_SWEEP_STILL_DPS) { if (still_since == 0) still_since = now; }
+      else still_since = 0;
+      bool still = still_since != 0 && now - still_since >= FAN_SWEEP_STILL_MS;
+      bool timed_out = now - phase_t0 >= FAN_SWEEP_SETTLE_MAX_MS;
+      if (still || timed_out) {
+        if (timed_out && !still) print_both(String("[CAUTION] Body still turning at ") + String(rate, 1) + " deg/s; starting the step anyway.");
+        if (saturated) print_both("[CAUTION] Wheel is at its speed limit; this step's numbers may be off.");
+        // Start the step: hold the wheel at its current speed, fans on (kick from rest so low duties start).
+        phase = ON;
+        phase_t0 = now;
+        pin = (step % 2 == 0) ? FAN_UPPER_PIN : FAN_LOWER_PIN;
+        duty = (step / 2) * FAN_SWEEP_STEP_PCT;
+        set_wheel_rpm(w_cmd_rpm);
+        w_prev_cmd_rpm = w_cmd_rpm;
+        float start = (duty > 0) ? 100.0 : 0.0;
+        if (pin == FAN_UPPER_PIN) set_fans(start, 0); else set_fans(0, start);
+        kick_until = (duty > 0) ? now + FAN_KICK_MS : 0;
+        heading_on0 = heading;
+        fit_n = 0; st = stt = sr = str_ = 0;
+        enc_marks = 0;
+        print_both(String("[INFO] Step ") + (step + 1) + "/" + n_steps + ": GPIO " + pin + " pair at " +
+                   String(duty, 0) + "%.");
+      }
+    } else { // ON
+      phase_name = "ON";
+      neopixelWrite(RGB_BUILTIN, 0, 255, 0); // green: fans on, measuring
+      if (kick_until != 0 && now >= kick_until) {
+        kick_until = 0;
+        if (pin == FAN_UPPER_PIN) set_fans(duty, 0); else set_fans(0, duty);
+      }
+      uint32_t t_step = now - phase_t0;
+      if (t_step >= FAN_SWEEP_FIT_START_MS) {
+        double ts = t_step / 1000.0;
+        fit_n++; st += ts; stt += ts * ts;
+        sr += rate;   str_ += ts * rate;
+      }
+      // mark the encoder count at the start, middle and end of the fit window
+      if ((enc_marks == 0 && t_step >= FAN_SWEEP_FIT_START_MS) || (enc_marks == 1 && t_step >= fit_mid_ms) ||
+          (enc_marks == 2 && t_step >= FAN_SWEEP_ON_MS)) {
+        enc_c[enc_marks] = enc.getCount();
+        enc_t[enc_marks] = now;
+        enc_marks++;
+      }
+      if (t_step >= FAN_SWEEP_ON_MS) {
+        set_fans(0, 0);
+        float body_accel = fit_slope(fit_n, st, sr, stt, str_);   // deg/s^2
+        // wheel accel (RPM/s): average speed in the 2nd half minus the 1st half, over the time between their centres
+        float wheel_accel = 0.0;
+        if (enc_marks == 3 && enc_t[1] > enc_t[0] && enc_t[2] > enc_t[1]) {
+          float w1 = (float)(enc_c[1] - enc_c[0]) / ((float)CPR * 10.0) / ((enc_t[1] - enc_t[0]) / 60000.0f);
+          float w2 = (float)(enc_c[2] - enc_c[1]) / ((float)CPR * 10.0) / ((enc_t[2] - enc_t[1]) / 60000.0f);
+          wheel_accel = (w2 - w1) / ((enc_t[2] - enc_t[0]) / 2000.0f);
+        }
+        float tau = I_BODY_Z * body_accel / 57.2957795 + I_WHEEL * wheel_accel * 2.0 * PI / 60.0;
+        tau_result[pin == FAN_UPPER_PIN ? 0 : 1][step / 2] = tau;
+        print_both(String("[RESULT] GPIO ") + pin + " pair " + String(duty, 0) + "%: torque " +
+                   String(tau * 1000.0, 3) + " mN*m (" + (tau >= 0 ? "CCW" : "CW") + ") | body accel " +
+                   String(body_accel, 2) + " deg/s^2, rate " + String(rate, 1) + " deg/s, turned " +
+                   String(heading - heading_on0, 1) + " deg | wheel " + String(wheel_accel, 2) + " RPM/s");
+        step++;
+        if (step >= n_steps) break;
+        phase = SETTLE;
+        phase_t0 = now;
+        still_since = 0;
+      }
+    }
+
+    // Log to SD:
+    dataFile.print(t);                       dataFile.print(",");
+    dataFile.print(step + 1);                dataFile.print(",");
+    dataFile.print(phase == ON ? pin : 0);   dataFile.print(",");
+    dataFile.print(phase == ON ? duty : 0, 0); dataFile.print(",");
+    dataFile.print(phase_name);              dataFile.print(",");
+    dataFile.print(heading, 2);              dataFile.print(",");
+    dataFile.print(rate, 3);                 dataFile.print(",");
+    dataFile.print(accel_f, 3);              dataFile.print(",");
+    dataFile.print(w_cmd_rpm, 1);            dataFile.print(",");
+    dataFile.print(w_meas, 1);               dataFile.print(",");
+    dataFile.println((long)enc.getCount());
+
+    // Telemetry (Name:value for GCS plotter): every point on USB, 2 Hz on XBee
+    String s = "t:" + String(t) + ",step:" + String(step + 1) + ",pin:" + String(phase == ON ? pin : 0) +
+               ",duty:" + String(phase == ON ? duty : 0, 0) + ",hdg:" + String(heading, 1) +
+               ",gZ:" + String(rate, 2) + ",aZ:" + String(accel_f, 2) +
+               ",wCmd:" + String(w_cmd_rpm, 0) + ",wMeas:" + String(w_meas, 0);
+    Serial.println(s);
+    if (test_point_count % 10 == 0) {
+      dataFile.flush(); // save file every 10 test points
+      Xbee.println(s);
+    }
+  }
+
+  driver.setOutput(0);
+  set_fans(0, 0);
+  dataFile.close();
+  neopixelWrite(RGB_BUILTIN, 0, 255, 0);
+  print_both("[RESULT] Fan torque (mN*m, + = CCW / +Z from above):");
+  print_both("duty(%),GPIO27_pair,GPIO4_pair");
+  for (int i = 0; i < n_levels; i++) {
+    print_both(String(i * FAN_SWEEP_STEP_PCT) + "," + String(tau_result[0][i] * 1000.0, 3) + "," +
+               String(tau_result[1][i] * 1000.0, 3));
+  }
+  print_both(String("[INFO] Sweep complete. Wheel and fans stopped. File ") + file_name +
+             " closed. Plot it with analysis/plot_fansweep.py.");
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8 Command 19: Fan Hold Test
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Sun tracker (command 13) with a disturbance: once pointing has stayed within FAN_HOLD_BAND_DEG
+ *        for FAN_HOLD_TIME_MS, one fan pair turns on and the reaction wheel has to fight it.
+ *        Asks for the direction ('cw' = GPIO 27 pair, 'ccw' = GPIO 4 pair, seen from above) and an
+ *        optional duty (default 100%), e.g. "ccw" or "cw 60". Prints when pointing first leaves the band
+ *        and when the wheel saturates; logs to SunTrack_dataNNN.csv like command 13.
+ */
+void fan_hold_test() {
+  print_both("[INFO] Fan hold test. Send the fan direction seen from above: 'cw' or 'ccw' (optional duty, e.g. 'cw 60'; default 100%). 'X' cancels.");
+  String line = wait_for_line();
+  line.toLowerCase();
+  if (line == "x" || line.length() == 0) { print_both("[INFO] Test canceled."); return; }
+  int space = line.indexOf(' ');
+  String dir = (space < 0) ? line : line.substring(0, space);
+  float duty = (space < 0) ? 100.0 : constrain(line.substring(space + 1).toFloat(), 0.0, 100.0);
+  if (dir != "cw" && dir != "ccw") { print_both("[CAUTION] Send 'cw' or 'ccw'. Test canceled."); return; }
+  if (duty <= 0) { print_both("[CAUTION] Duty must be above 0. Test canceled."); return; }
+
+  print_both(String("[INFO] ") + (dir == "cw" ? "Clockwise (GPIO 27 pair)" : "Counter-clockwise (GPIO 4 pair)") +
+             " at " + String(duty, 0) + "%.");
+  if (dir == "cw") sun_track(true, duty, 0.0);
+  else             sun_track(true, 0.0, duty);
 }

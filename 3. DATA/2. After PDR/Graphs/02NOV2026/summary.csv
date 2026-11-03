@@ -1,0 +1,6 @@
+run,type,direction,duty_pct,time_to_saturate_s,time_to_lose_pointing_s,max_err_before_sat_deg,wheel_at_fans_on_rpm,wheel_slope_rpm_s,torque_mNm,pct_in_band_tracking
+SunTrack_data016,baseline (fans off),off,0,,,,,-0.70,-0.26,89.94
+SunTrack_data017,baseline (fans off),off,0,,,,,-0.94,-0.34,91.06
+SunTrack_data018,baseline (fans off),off,0,,,,,-0.55,-0.20,85.47
+SunTrack_data019,fan hold,CW,100.00,51.50,55.14,7.74,-21.80,-6.27,-2.30,
+SunTrack_data020,fan hold,CCW,100.00,49.50,52.70,3.67,38.10,6.86,2.51,

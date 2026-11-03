@@ -100,4 +100,45 @@
 #define TRACK_SPINUP_MS         3000    // ramp wheel 0 -> bias (hold KestrelSAT still)
 #define TRACK_RELEASE_MS        8000    // RGB LED turns blue: release KestrelSAT
 #define TRACK_CONTROL_MS        10000   // closed-loop control begins
-#define TRACK_DURATION_MS       120000  // test ends automatically after this (or send 'X')
+#define TRACK_DURATION_MS       120000  // test ends automatically after this (or send 'X'); change at runtime with 'dur' (command 14)
+
+
+
+/*---------------------------------------------------------------------------------------------*/
+// Disturbance Fans (Pi-Fan LD3007MS, 5 V 0.2 A, 2-wire brushless) - command 17:
+/*---------------------------------------------------------------------------------------------*/
+// Two fans per pin, each pair switched by an XY-MOS (D4184) module. Fans sit at y = +/-32 cm, 2 cm above
+// or below centre. Wired DIAGONALLY (2 Nov) so each pin twists KestrelSAT about Z: one fan at +Y and one at -Y,
+// blowing opposite ways. (Same-direction pairs cancel about Z at any duty.) The "UPPER"/"LOWER" names are
+// only the old labels; in commands 17/18 'u' = GPIO 27 pair, 'l' = GPIO 4 pair.
+#define FAN_UPPER_PIN           27      // diagonal pair 'u': twists KestrelSAT CLOCKWISE seen from above (-Z)
+#define FAN_LOWER_PIN           4       // diagonal pair 'l': twists KestrelSAT COUNTER-CLOCKWISE from above (+Z)
+#define FAN_UPPER_LEDC_CH       0       // LEDC channels 0 and 2 (timers 0 and 1); analogWrite() for the
+#define FAN_LOWER_LEDC_CH       2       //   motor driver takes channels 15 and 14 (timer 3), so no clash
+#define FAN_PWM_BITS            10      // duty resolution (0-1023)
+#define FAN_PWM_INVERTED        0       // 0: GPIO straight to the XY-MOS trigger (what we have). 1: only if an inverting
+                                        //   NPN stage is ever added in front of the trigger (GPIO high = fans OFF).
+                                        //   Direct 3.3 V only half-opens the XY-MOS: 2.2 V across the fans at 100% (2 Nov).
+#define FAN_PWM_FREQ_HZ         25      // low-frequency PWM suits 2-wire fans; try 'freq 20000' in command 17 if
+                                        //   speed control is poor (the XY-MOS is rated 0-20 kHz)
+#define FAN_KICK_MS             500     // run at 100% this long when starting from rest, so low duties still spin up
+#define FAN_START_DELAY_MS      10000   // command 13: fans turn on this long after the first scan finds the sun
+#define FAN_SAT_STOP_MS         10000   // command 13: with fans on, end the test after the wheel is saturated this long
+
+// Command 19 fan hold test: command 13, but the fans turn on once KestrelSAT has been inside the pointing band
+// for FAN_HOLD_TIME_MS. Reports how long pointing stays inside the band and when the wheel saturates.
+#define FAN_HOLD_BAND_DEG       10.0    // pointing requirement (deg, gyro heading vs sun heading)
+#define FAN_HOLD_TIME_MS        10000   // fans turn on after this long inside the band
+#define FAN_HOLD_DURATION_MS    1200000 // command 19 runs up to 20 min (the weak fans may take minutes to saturate)
+
+// Command 18 fan torque sweep: for each duty 0, 10, ... 100%, run the GPIO 27 pair, then the GPIO 4 pair
+// (alternating, so the string twist and the wheel speed stay near zero), and measure how fast KestrelSAT
+// spins up. Torque = I_BODY_Z * body accel + I_WHEEL * wheel accel. Between steps the wheel stops the body.
+#define FAN_SWEEP_STEP_PCT      10      // duty step (%)
+#define FAN_SWEEP_BIAS_MS       3000    // gyro bias measured first (KestrelSAT hanging still, wheel off)
+#define FAN_SWEEP_ON_MS         4000    // fans on this long per step, wheel held at a constant speed
+#define FAN_SWEEP_FIT_START_MS  1500    // accel is fitted from here to the end of the step (skips kick + spin-up)
+#define FAN_SWEEP_STILL_DPS     1.0     // between steps the wheel damps the body until slower than this...
+#define FAN_SWEEP_STILL_MS      1500    // ...for this long...
+#define FAN_SWEEP_SETTLE_MAX_MS 20000   // ...or this long at most
+#define FAN_SWEEP_ACCEL_TAU_S   0.3     // smoothing time constant for the printed/logged body acceleration

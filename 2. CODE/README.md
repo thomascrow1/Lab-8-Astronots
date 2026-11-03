@@ -43,10 +43,13 @@ the satellite until the **solar array (−X face, 180°)** points at the light.
 | 11 | **Stream sun sensor.** Shows sun direction, error, magnitude, gyro and calibrated channels (wheel off). Send `X` to stop. |
 | 12 | **Sign check.** Pulses the wheel +30% for 1 s, then sets `gyro_sign` and `wheel_pwm_sign` from how the body turned. |
 | 13 | **Run sun tracker.** Spin-up (hold the satellite) → LED **blue** = release → closed-loop tracking. Logs `SunTrack_dataNNN.csv`. Send `X` to stop. |
-| 14 | **Print/set parameters.** Send e.g. `kp 0.004`, `kd 0.01`, `bias 0.5`, `axis 180`, `wsign -1`, `gsign 1`, then `done`. |
+| 14 | **Print/set parameters.** Send e.g. `kp 0.004`, `kd 0.01`, `bias 0.5`, `axis 180`, `wsign -1`, `gsign 1`, `dur 300` (command 13 length, s), then `done`. |
 | 15 | **Attitude determination check** (wheel off). Light off → 8 light spots every 45° → gyro still → turn KestrelSAT ~90° by hand. PASS/FAIL per step (±15°). Logs `ADCheck_dataNNN.csv`; plot with `python analysis/plot_adcheck.py`. Run 10 first if the sun sensor wiring changed. |
 | 16 | **Phototransistor resistor sweep.** Send a resistor value (`4700`, `10k`), then light off + light on each face. Repeat per resistor, then `done`. Logs `PTSweep_dataNNN.csv`; plot with `python analysis/plot_ptsweep.py`, which picks the resistor with the most signal and no saturation. Keep the light at the same distance every time. |
-| 0 | Stop the reaction wheel (unchanged). |
+| 17 | **Disturbance fans.** Fans are wired in diagonal pairs so each pin twists KestrelSAT about Z. Send `u 60` (GPIO 27 pair, clockwise from above), `l 60` (GPIO 4 pair, counter-clockwise), `both 60` (twists cancel: control run), `off`, `freq 25`, then `done`. Fans spin while you set them; command 13 then turns them on at those duties 10 s after the sun is found, logs `fan_gpio27(%)`/`fan_gpio4(%)`, prints `[RESULT] Wheel saturated N s after the fans turned on`, and ends 10 s after saturation. Theory + measured torque: `python analysis/fan_thrust_model.py --csv SunTrack_dataNNN.csv`. |
+| 18 | **Fan torque sweep** (hanging, ~4 min). Gyro bias first (hang still), then 0, 10, … 100% on the GPIO 27 pair, then the GPIO 4 pair, alternating. Each step: wheel stops the body, fans on 4 s with the wheel held steady, torque = I_body·(body accel) + I_wheel·(wheel accel). Prints a `[RESULT]` line per step (torque, accel, rate, angle turned) and a table at the end; logs `FanSweep_dataNNN.csv`. Plot: `python analysis/plot_fansweep.py FanSweep_dataNNN.csv`. |
+| 19 | **Fan hold test.** Send `cw` (GPIO 27 pair) or `ccw` (GPIO 4 pair), optionally with a duty (`ccw 60`; default 100%). Runs exactly like 13; once pointing has stayed within ±10° for 10 s the fans turn on and the wheel fights them. Prints `[RESULT]` when pointing first leaves ±10° and when the wheel saturates, plus a summary (time to lose pointing, % of time inside the band). Ends 10 s after saturation, on `X`, or after 20 min. Logs `SunTrack_dataNNN.csv`. |
+| 0 | Stop the reaction wheel and the fans. |
 
 **RGB LED during command 13:** yellow = hold still, blue = let go, orange = slewing, green = within ±10°, red = sun lost (wheel stopped).
 
