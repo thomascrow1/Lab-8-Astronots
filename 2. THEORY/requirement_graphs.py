@@ -330,6 +330,132 @@ def draw(ax, graph, runs, side):
     return rows
 
 
+# ------------------------------------------------------------------------------------------- slide
+# Graph 3 on its own, made for a projector: big text, thick lines, and two stacked panels that tell
+# the story (top = pointing, bottom = wheel speed). Same data as the small panel in requirements_6graphs.
+SLIDE_FONT = 15
+DUMP_FILL = "#f5c542"      # stronger yellow than the 6-panel graph so it survives a washed-out projector
+SLIDE_BAND = "#b9d7b0"     # green-gray band = "good" zone
+
+
+def dump_spans(t, dumping):
+    dmp = dumping.astype(int)
+    starts = list(t[np.where(np.diff(dmp) == 1)[0] + 1])
+    ends = list(t[np.where(np.diff(dmp) == -1)[0] + 1])
+    if dmp[0]:
+        starts.insert(0, t[0])
+    if len(ends) < len(starts):
+        ends.append(t[-1])
+    return list(zip(starts, ends))
+
+
+def draw_graph3_slide(label, d, side, out_path, compare=None):
+    """label, d: the run with thrusters. compare: optional (label, d) of the same fans without thrusters."""
+    plt.rcParams.update({"font.size": SLIDE_FONT, "axes.labelsize": SLIDE_FONT, "xtick.labelsize": SLIDE_FONT - 1,
+                         "ytick.labelsize": SLIDE_FONT - 1, "axes.edgecolor": INK, "xtick.color": INK,
+                         "ytick.color": INK, "axes.labelcolor": INK})
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 8.5), sharex=True, gridspec_kw={"height_ratios": [3, 2]})
+
+    t0 = time_zero(d, "graph3")
+    t = d["t"] - t0
+    keep = t >= -PRE_FANS_S
+    t, a = t[keep], unwrap_deg(d["array_angle"][keep])
+    # wheel: the dumps trigger on the COMMANDED speed, so plot that (2 s average hides the ±3° aim dither)
+    n_avg = max(1, int(round(2.0 / max(np.median(np.diff(t)), 1e-3))))
+    box = np.ones(n_avg)
+    w = np.convolve(d["w_cmd"][keep], box, mode="same") / np.convolve(np.ones(keep.sum()), box, mode="same")
+    spans = dump_spans(t, d["dumping"][keep])
+    sc = score(d, "graph3")
+
+    for ax in (ax1, ax2):
+        for k, (s0, s1) in enumerate(spans):
+            ax.axvspan(s0, s1, color=DUMP_FILL, alpha=0.45, lw=0, zorder=0)
+        ax.axvline(0, color=INK, lw=1.5, ls=":", zorder=1)
+        ax.grid(axis="y", color=GRID, lw=1)
+        ax.set_axisbelow(True)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        for sp in ("left", "bottom"):
+            ax.spines[sp].set_linewidth(1.5)
+
+    # ---- top: pointing
+    ax1.axhspan(-BAND, BAND, color=SLIDE_BAND, alpha=0.7, lw=0, zorder=0)
+    ax1.axhline(0, color=INK, lw=1.2, zorder=1)
+    ax1.text(1.005, BAND, f"+{BAND:.0f}°", transform=ax1.get_yaxis_transform(), va="center", fontsize=SLIDE_FONT - 2,
+             color=INK, clip_on=False)
+    ax1.text(1.005, -BAND, f"−{BAND:.0f}°", transform=ax1.get_yaxis_transform(), va="center", fontsize=SLIDE_FONT - 2,
+             color=INK, clip_on=False)
+    ax1.text(1.005, 0, "Sun", transform=ax1.get_yaxis_transform(), va="center", fontsize=SLIDE_FONT - 1,
+             fontweight="bold", color=INK, clip_on=False)
+    ylim = 40.0
+    if compare is not None:
+        cl, cd = compare
+        ct0 = time_zero(cd, "graph3")
+        ct = cd["t"] - ct0
+        ck = ct >= -PRE_FANS_S
+        ca = unwrap_deg(cd["array_angle"][ck])
+        ax1.plot(ct[ck], ca, color=ORANGE, lw=2.5, zorder=2, label=cl)
+        csc = score(cd, "graph2")
+        if csc.get("pointing_held_s") is not None:
+            tl = csc["pointing_held_s"]
+            y_lost = np.sign(np.interp(tl, ct[ck], np.nan_to_num(ca))) * BAND
+            ax1.plot(tl, y_lost, "X", ms=16, color=ORANGE, mec="white", mew=2, zorder=5)
+            ax1.annotate(f"no thrusters:\nwheel saturates,\nSun lost at {tl:.0f} s", (tl, y_lost),
+                         xytext=(tl + 25, -ylim * 0.62), fontsize=SLIDE_FONT - 1, color=ORANGE, fontweight="bold",
+                         va="center", arrowprops=dict(arrowstyle="-", color=ORANGE, lw=2))
+    ax1.plot(t, a, color=BLUE, lw=2.2, zorder=3, label=label)
+    ax1.set_ylim(-ylim, ylim)
+    ax1.set_yticks([-30, -10, 0, 10, 30])
+    ax1.set_ylabel("array angle\nfrom Sun (deg)")
+    held = sc.get("pointing_held_s")
+    msg = (f"With thrusters: held the whole {sc['run_after_fans_s']:.0f} s run, worst error {sc['max_err_while_held_deg']:.1f}°"
+           if held is None else f"With thrusters: pointing lost at {held:.0f} s")
+    ax1.text(0.99, 0.95, msg, transform=ax1.transAxes, ha="right", va="top", fontsize=SLIDE_FONT, fontweight="bold",
+             color=BLUE, bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="none", alpha=0.9))
+
+    # ---- bottom: wheel speed (why the dumps happen)
+    wl = sim.WHEEL_MAX_RPM
+    sgn = 1 if np.nanmedian(w[t > 0]) >= 0 else -1      # only show the side the wheel actually spins
+    ax2.axhspan(sgn * wl, sgn * wl * 1.3, color=ORANGE, alpha=0.18, lw=0, zorder=0)
+    ax2.axhline(sgn * wl, color=ORANGE, lw=2, zorder=1)
+    ax2.text(1.005, sgn * wl, "wheel limit", transform=ax2.get_yaxis_transform(), va="center", fontsize=SLIDE_FONT - 2,
+             color=ORANGE, fontweight="bold", clip_on=False)
+    for lvl, txt in ((sim.DESAT_START_RPM, "dump\nstarts"), (sim.DESAT_STOP_RPM, "dump\nstops")):
+        ax2.axhline(sgn * lvl, color=INK2, lw=1.2, ls="--", zorder=1)
+        ax2.text(1.005, sgn * lvl, txt, transform=ax2.get_yaxis_transform(), va="center", fontsize=SLIDE_FONT - 3,
+                 color=INK2, clip_on=False)
+    ax2.plot(t, w, color=INK, lw=2.5, zorder=3)
+    ax2.set_ylim(*sorted((-sgn * 60, sgn * wl * 1.12)))
+    ax2.set_yticks([sgn * v for v in (0, 100, 200, 300, 400)])
+    ax2.set_ylabel("wheel speed cmd\n(RPM, 2 s avg)")
+    ax2.set_xlabel("time since the disturbance fans turned on (s)")
+    ax2.set_xlim(-PRE_FANS_S, t[-1] * 1.01)
+    if spans:
+        s0, s1 = spans[0]
+        ax2.annotate("fans spin the\nwheel up", (s0 * 0.6, sgn * 0.6 * sim.DESAT_START_RPM),
+                     xytext=(s0 * 0.08, sgn * wl * 0.85), fontsize=SLIDE_FONT - 2, color=INK, ha="left", va="center",
+                     arrowprops=dict(arrowstyle="->", color=INK, lw=1.5))
+        ax2.text((s0 + s1) / 2, sgn * 20, "thrusters\nslow it", va="bottom", fontsize=SLIDE_FONT - 2, color="#8a5a00",
+                 fontweight="bold", ha="center")
+
+    fig.suptitle("S2: thrusters dump wheel momentum, so the array stays on the Sun", fontsize=SLIDE_FONT + 4,
+                 fontweight="bold", x=0.01, ha="left", color=INK)
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    handles = [Line2D([], [], color=BLUE, lw=3, label="with thrusters")]
+    if compare is not None:
+        handles.append(Line2D([], [], color=ORANGE, lw=3, label="no thrusters (same fans)"))
+    handles += [Patch(color=DUMP_FILL, alpha=0.6, label="thrusters firing"),
+                Patch(color=SLIDE_BAND, alpha=0.9, label=f"±{BAND:.0f}° requirement")]
+    fig.text(0.01, 0.935, side, fontsize=SLIDE_FONT - 2, color=INK2, va="center")
+    fig.legend(handles=handles, loc="upper right", ncol=len(handles), frameon=False, fontsize=SLIDE_FONT - 2,
+               bbox_to_anchor=(0.99, 0.955))
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    plt.rcdefaults()
+
+
 # ------------------------------------------------------------------------------------------- main
 def fmt(v, unit=""):
     if v is None:
@@ -411,6 +537,13 @@ def main():
             f1.tight_layout()
             f1.savefig(os.path.join(args.out, f"{g}_{tag}.png"), dpi=150)
             plt.close(f1)
+            if g == "graph3" and runs:
+                # projector version replaces the plain one; the model gets a "no thrusters" run to compare
+                compare = None
+                if tag == "model":
+                    kw = dict(MODEL_RUNS["graph3"][0][1], desat=False, demo_req=2)
+                    compare = ("no thrusters", from_model("no thrusters", kw))
+                draw_graph3_slide(*runs[0], side, os.path.join(args.out, f"{g}_{tag}.png"), compare)
             with open(os.path.join(args.out, f"{g}_{tag}.csv"), "w", newline="") as f:
                 w = csv.writer(f)
                 w.writerow(header)

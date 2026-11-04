@@ -491,3 +491,16 @@ Also: the `error(deg)` column reads ~0° the whole run (only −X lit), so the t
 **Results:** R2 PASS (3.2 s, model 3.1 s). R1 PASS (100% inside ±10°, 88% inside ±5°, max 9.6°, RMS 3.2°). R3 PASS at both duties: 100% saturated 66.6 s after fans on (model 61 s); 50% saturated 1008 s (model 430 s) and pointing never left ±10°.
 **Model vs hardware at 50%:** the measured torque at 50% is ~0.18 mN·m (wheel slope 0.48 RPM/s), about half the model's 0.34 mN·m. Today's 100% run gave 2.21 mN·m. The model's guessed 20% fan stall duty is too low; these two runs fit ~31%. The model was left as the pre-test prediction (not refit).
 **Verify:** the wheel slope at 50% fell over the run (~0.8 RPM/s early, ~0.3 RPM/s after 400 s): battery / 5 V rail sag over 17 min? Check the battery voltage before and after a long run.
+
+## 2026-11-04: Graph 3 (S2) redrawn for the projector
+
+**Asked:** make Graph 3 easier to see on a faded projector and tell a better story.
+**Changed:** `requirement_graphs.py`: new `draw_graph3_slide()`. `graph3_model.png` (and `graph3_hardware.png` once an S2 run exists) is now two stacked panels with large text and thick lines: top = array angle with a green ±10° band, bottom = wheel speed with the 400 RPM limit and the 300/80 RPM dump start/stop lines, so you can see *why* the thrusters fire. The model panel also runs the same 70% fans with no thrusters (orange): the Sun is lost at 157 s, compared with the whole 568 s held with dumps (worst error 4.3°). The headline title states the result. The six-panel overview figure is unchanged. Only `6. FINAL/figures/requirements/graph3_model.png` was replaced.
+**Verify:** none on hardware (plotting only). When the S2 hardware run exists, check that its slide version reads well (no "no thrusters" comparison on the hardware panel).
+
+## 2026-11-04: S2 hardware run graphed
+
+**Asked:** make the hardware Graph 3 from today's S2 run (`4. DATA/2. After PDR/2026-11-04/S2_data001.csv`, renamed by the team from 002; the cancelled 12 s run is not used).
+**Changed:** `requirement_graphs.py` (projector Graph 3 only): the wheel panel now plots the *commanded* wheel speed with a 2 s average. The dumps trigger on the command, so the peaks now land on the 300 RPM line; measured speed lags about 30 RPM and looked like a bug. Regenerated all of `6. FINAL/figures/requirements/` with the R1R2, R3 and S2 hardware files.
+**Results:** S2 PASS. CCW 70% fans for 942 s: 8 dumps finished, pointing never left ±10° (worst 7.6°). One cycle is about 100 s on hardware (50 s spin-up from 80 to 300 RPM, 50 s dump; the first dump took 72 s), against about 140 s in the model, so the 70% fan torque on hardware is higher than the model predicts.
+**Verify on KestrelSAT:** gyro heading drifted about +1.1°/s for the whole run (`hdg` 512° → 1580°) while the sun stayed on −X. The sun-lobe tracker kept up by stepping `sunHdg` +5° (its max step) every few seconds. Re-check the gyro bias with the fans/wheel running; a little more drift could lose lock.

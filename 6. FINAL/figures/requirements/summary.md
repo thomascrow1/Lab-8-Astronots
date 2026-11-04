@@ -22,6 +22,7 @@ Pointing = solar array angle from the Sun (gyro heading − scan sun heading). �
 
 | Source | Run | Disturbance | Dumps finished | Pointing held | Max error while held | S2 |
 |---|---|---|---|---|---|---|
+| hardware | S2_data001 (CCW 70%) | CCW 70% | 8 | never lost (941.7 s run) | 7.6° | PASS |
 | model | Model: CCW 70% + thrusters | CCW 70% | 3 | never lost (567.7 s run) | 4.3° | PASS |
 
 Times are from the requirement's start: the slew back (graph 1) or fans on (graphs 2, 3).
