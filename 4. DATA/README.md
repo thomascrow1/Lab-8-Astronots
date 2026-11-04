@@ -19,6 +19,7 @@ old 16 = resistor sweep (now 7), old 18 = fan sweep (removed), old 19 = fan hold
 | `2. After PDR/2026-10-30/graphs/` | `SunTrack_data008/009.png`, resistor sweep plots. |
 | `2. After PDR/2026-11-02/csv/` | Fan disturbance day. `SunTrack_data016–018`: tracker, fans off (baselines). `019`: fan hold test CW 100%. `020`: fan hold test CCW 100%. `FanSweep_data001`: fan torque sweep (unusable, rail sag). Fans on 5 V. |
 | `2. After PDR/2026-11-02/graphs/` | `fan_hold_report.py` output: `01`–`05` graphs, `summary.md`/`summary.csv`, `runs/` per-run overviews. |
+| `2. After PDR/2026-11-03/` | Command 10 requirement runs (CSVs straight in the folder). `R1R2_data001`: R2 + R1 (180° slew back in 3.2 s, 30 s hold, 100% inside ±10°). `R3_data001`: CCW fans 100% (wheel saturated 66.6 s after fans on). `R3_data002`: CCW fans 50% (first at the wheel limit 906 s, saturated 1008 s; pointing never left ±10°; ended by the 10 s saturation stop). Graphs: `6. FINAL/requirements/` (`requirement_graphs.py`). |
 | `2. After PDR/analyze_suntrack.m` | MATLAB plots for every `SunTrack_data*.csv` under `2. After PDR/` (writes to `2. After PDR/plots/`). |
 
 ## Adding a new test day

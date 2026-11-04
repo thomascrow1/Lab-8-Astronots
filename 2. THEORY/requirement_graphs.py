@@ -51,6 +51,8 @@ R2_CONFIRM_S = sim.DEMO_R2_CONFIRM_MS / 1000.0
 R3_JUDGE_S = sim.DEMO_R3_FAN_MS / 1000.0
 PRE_FANS_S = 15.0          # graphs 2 and 3 start this long before the fans turn on
 GRAPH23_YLIM = 45.0        # graphs 2 and 3: y axis ±45° (pointing lost runs off the top/bottom)
+SAT_HOLD_S = 2.0           # "saturated" = at the wheel limit this long in a row (firmware warns after 2 s);
+                           #   near the limit the wheel touches it for a fraction of a second many times first
 
 # Reference palette (dataviz skill, validated): categorical slots in fixed order.
 BLUE, ORANGE, AQUA, YELLOW, MAGENTA = "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"
@@ -164,6 +166,20 @@ def first_t(d, mask):
     return d["t"][idx[0]] if len(idx) else None
 
 
+def first_long_run(t, mask, min_s):
+    """Start of the first stretch where mask stays True for at least min_s (None if never)."""
+    start = None
+    for i in range(len(t)):
+        if mask[i] and start is None:
+            start = i
+        if start is not None and (not mask[i] or i == len(t) - 1):
+            end = i if mask[i] else i - 1
+            if t[end] - t[start] >= min_s - 1e-6:
+                return t[start]
+            start = None
+    return None
+
+
 def time_zero(d, graph):
     """Graph 1: start of the slew back. Graphs 2/3: fans on."""
     if graph == "graph1":
@@ -207,9 +223,9 @@ def score(d, graph):
         s["fans"] = fan_label(d)
         on = t >= 0
         lost = first_t({"t": t}, on & ~inside)
-        sat = first_t({"t": t}, on & d["sat"])
         s["pointing_held_s"] = lost
-        s["saturated_s"] = sat
+        s["first_at_limit_s"] = first_t({"t": t}, on & d["sat"])
+        s["saturated_s"] = first_long_run(t, on & d["sat"], SAT_HOLD_S)
         s["run_after_fans_s"] = float(t[-1])
         held_until = lost if lost is not None else t[-1]
         s["max_err_while_held_deg"] = float(np.nanmax(np.abs(a[on & (t < held_until)]))) if (on & (t < held_until)).any() else None
@@ -295,10 +311,11 @@ def draw(ax, graph, runs, side):
             ax.text(sc["pointing_held_s"], -GRAPH23_YLIM * 0.85, f"pointing lost {sc['pointing_held_s']:.0f} s ",
                     color=INK, fontsize=8, ha="right")
         if graph == "graph1" and sc.get("r2_reach_s") is not None:
-            ax.plot(sc["r2_reach_s"], BAND * np.sign(sc["start_angle_deg"] or 1), "o", ms=8, color=c,
-                    mec="white", mew=2, zorder=4)
-            ax.annotate(f"reached ±10° at {sc['r2_reach_s']:.1f} s", (sc["r2_reach_s"], BAND * np.sign(sc["start_angle_deg"] or 1)),
-                        xytext=(12, 30 * np.sign(sc["start_angle_deg"] or 1)), textcoords="offset points", fontsize=8, color=INK,
+            y_reach = float(np.interp(sc["r2_reach_s"], t, np.nan_to_num(a)))  # on the plotted (unwrapped) trace
+            up = 1 if y_reach >= 0 else -1
+            ax.plot(sc["r2_reach_s"], y_reach, "o", ms=8, color=c, mec="white", mew=2, zorder=4)
+            ax.annotate(f"reached ±10° at {sc['r2_reach_s']:.1f} s", (sc["r2_reach_s"], y_reach),
+                        xytext=(14, 40 * up), textcoords="offset points", fontsize=8, color=INK,
                         arrowprops=dict(arrowstyle="-", color=INK2, lw=0.8))
         ax.plot(t, a, color=c, lw=2, label=label, zorder=3)
         for k in np.where(keep)[0]:
@@ -335,12 +352,12 @@ def write_summary(out, results):
             lines.append(f"| {r['source']} | {r['run']} | {fmt(r.get('start_angle_deg'), '°')} | {fmt(r.get('r2_reach_s'), ' s')} | "
                          f"{r.get('r2', '—')} | {fmt(r.get('r1_hold_s'), ' s')} | {fmt(r.get('r1_in10_pct'), '%')} | "
                          f"{fmt(r.get('r1_in5_pct'), '%')} | {fmt(r.get('r1_max_deg'), '°')} | {fmt(r.get('r1_rms_deg'), '°')} | {r.get('r1', '—')} |")
-    lines += ["", "## Graph 2 · R3 (fans)", "", "| Source | Run | Fans | Pointing held | Wheel saturated | Max error while held | R3 (30 s) |",
-              "|---|---|---|---|---|---|---|"]
+    lines += ["", "## Graph 2 · R3 (fans)", "", "| Source | Run | Fans | Pointing held | Wheel first at limit | Wheel saturated (≥2 s) | Max error while held | R3 (30 s) |",
+              "|---|---|---|---|---|---|---|---|"]
     for r in flat:
         if r["graph"] == "graph2":
             held = fmt(r.get("pointing_held_s"), " s") if r.get("pointing_held_s") is not None else f"never lost ({fmt(r.get('run_after_fans_s'), ' s')} run)"
-            lines.append(f"| {r['source']} | {r['run']} | {r.get('fans', '—')} | {held} | {fmt(r.get('saturated_s'), ' s')} | "
+            lines.append(f"| {r['source']} | {r['run']} | {r.get('fans', '—')} | {held} | {fmt(r.get('first_at_limit_s'), ' s')} | {fmt(r.get('saturated_s'), ' s')} | "
                          f"{fmt(r.get('max_err_while_held_deg'), '°')} | {r.get('r3', '—')} |")
     lines += ["", "## Graph 3 · S2 (momentum dump)", "", "| Source | Run | Disturbance | Dumps finished | Pointing held | Max error while held | S2 |",
               "|---|---|---|---|---|---|---|"]

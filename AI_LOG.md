@@ -483,3 +483,11 @@ Also: the `error(deg)` column reads ~0° the whole run (only −X lit), so the t
 - [ ] `10` → `3`: keeps dumping after the PASS line; ends when pointing is lost or on 'X'; 'X' stops the wheel and all four fans
 - [ ] Run `requirement_graphs.py` on the new CSVs and check the hardware panels line up with the model
 - [ ] Model 50% prediction depends on the guessed fan stall duty (20%); the 50% run measures it
+
+## 2026-11-03: Requirement graphs from the first command 10 runs
+
+**Asked:** make the requirement graphs from today's runs (`4. DATA/2. After PDR/2026-11-03/`: R1R2_data001, R3_data001 at CCW 100%, R3_data002 at CCW 50%). S2 not run yet.
+**Changed:** `requirement_graphs.py`: "wheel saturated" is now the first time the wheel stays at the limit ≥ 2 s (the firmware's warning rule). At 50% the wheel touched 400 RPM for fractions of a second 30+ times (first at 906 s) before it stayed there. The summary also lists the first touch. The graph 1 "reached ±10°" dot now sits on the plotted line. Regenerated `6. FINAL/requirements/`. `4. DATA/README.md` row added.
+**Results:** R2 PASS (3.2 s, model 3.1 s). R1 PASS (100% inside ±10°, 88% inside ±5°, max 9.6°, RMS 3.2°). R3 PASS at both duties: 100% saturated 66.6 s after fans on (model 61 s); 50% saturated 1008 s (model 430 s) and pointing never left ±10°.
+**Model vs hardware at 50%:** the measured torque at 50% is ~0.18 mN·m (wheel slope 0.48 RPM/s), about half the model's 0.34 mN·m. Today's 100% run gave 2.21 mN·m. The model's guessed 20% fan stall duty is too low; these two runs fit ~31%. The model was left as the pre-test prediction (not refit).
+**Verify:** the wheel slope at 50% fell over the run (~0.8 RPM/s early, ~0.3 RPM/s after 400 s): battery / 5 V rail sag over 17 min? Check the battery voltage before and after a long run.
