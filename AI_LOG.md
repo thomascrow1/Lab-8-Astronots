@@ -393,3 +393,75 @@ Also: the `error(deg)` column reads ~0° the whole run (only −X lit), so the t
 
 **Asked:** a .md in `3. CODE` explaining each function in KestrelSAT_SunTracker.
 **Changed:** new `3. CODE/FUNCTIONS.md` (every function in `main.cpp`, `sun_tracker.cpp`, `sd_funcitons.cpp`, plus the command table and sun_track mode table), linked from `README.md`. While reading, fixed three messages the renumbering missed in `main.cpp`: calibration said "Run 10 again" (now 3), AD check said "14 -> gsign" (now 5), resistor sweep pointed at `analysis/plot_ptsweep.py` (now `2. THEORY/`). Compiles.
+
+## 2026-11-02: Command 10 requirement demo
+
+**Asked:** a command for the final presentation demo: send 10, then 1, 2 or 3 to show each requirement working.
+**Requirements used:** the ones in `6. FINAL/Astro-nots Lab 8 Final Presentation.pptx` slide 5 (not the older README draft): R1 hold within 10°, R2 from 180° reach the sun within 10 s and stay within 10°, R3 hold within 10° with the disturbance fans on.
+**Changed:**
+- `main.cpp`: new `req_demo()` (command 10; 9 left unused because the team asked for 10). `sun_track()` takes an optional `demo_req` (default 0, so commands 4 and 8 are unchanged). With it set, it prints `[DEMO]` progress every 5 s and ends with PASS/FAIL. For R2 a `demo_offset` of 180° turns the array away (lobing paused), then 0° starts the timed slew back. Every demo exit goes through `end_test()` (wheel and fans off, file closed).
+- `definitions.h`: `DEMO_*` settings (R1 30 s hold, R2 5 s settle / 3 s away / 10 s limit / 5 s confirm, R3 30 s with fans, 3 min give-up).
+- README, `3. CODE/FUNCTIONS.md`, CLAUDE.md: command 10 added. Compiles.
+**Note:** R3 in the presentation says 2 N·m; the fans make about 2.4 mN·m (`fan_thrust_model.py`).
+**Verify on KestrelSAT:**
+- [ ] `1` lists 10; `10` then `1`: progress lines, R1 PASS after ~30 s green; 'X' stops the wheel
+- [ ] `10` then `2`: turns ~180° away and holds, then slews back; reach time printed; latch picks one direction (no back-and-forth)
+- [ ] `10` then `3` (and `3 cw`): fans start after 10 s green, PASS/FAIL after 30 s, fans and wheel stop at the end
+- [ ] After R2's slew back, no unexpected rescan (−X bright again when pointed at the sun)
+
+## 2026-11-02: Final presentation draft
+
+**Asked:** what the final presentation should contain, then a first draft of the slides.
+**Used:** Lab 8 guidance (18–20 min, plots, live demo), PDR feedback (keep and compare pointing error plots; quantify settling time, error and wheel saturation; saturation → resistor → data; show code), and the 30 Oct / 2 Nov data.
+**Changed:**
+- `2. THEORY/final_figures.py` (new): `6. FINAL/figures/fig_pdr_vs_final.png` (PDR run 052 vs 30 Oct run 015), `fig_sim_vs_hw.png` (sim with run 015's start vs hardware), `run_summary.csv` (settle time, longest hold, % in ±10°/±5°, RMS for runs 014–017). Error = gyro heading − scanned sun heading, because the sun-sensor error reads ~0 when only −X is lit.
+- `6. FINAL/Astro-nots Lab 8 Final Presentation DRAFT.pptx` (new, 19 slides; the original deck is unchanged). Kept the title, overview, application, requirements (status column rewritten) and the PDR run 052 slide; removed the guidance slide and the other PDR-only slides. Added system overview, control architecture, code walkthrough, what changed since PDR, resistor sweep, sim vs hardware, PDR vs final, results table, two disturbance slides, limitations, live demo (command 10), lessons/AI use, questions. Speaker notes on every slide.
+**Results used:** runs 014/015 settle 14.5–15.1 s from control start (10 s is the scan), 100% within ±10° after settling, RMS 2.4–2.6°, ~95 s continuous hold. Runs 016/017 hold 52–54 s before a rescan. Fans: 2.0–2.8 mN·m, pointing held 52–55 s. Sim with the same start settles in 12.5 s.
+**Not checked:** the slides were not looked at as images (PowerPoint's PDF export hung while the screen was locked). The file passes the package validator.
+**Team must fill in or decide (marked [TEAM] in red on the slides):**
+- [ ] One set of requirements: the deck (PDR) set or the README set
+- [ ] "2 Nm" in the disturbance requirement (measured torque is ~2.4 mN·m)
+- [ ] R2 with command 10 → 2 (slew time without the scan); battery stretch (command 2 during command 4) or drop it
+- [ ] Demo backup video, GCS screenshot, repo link, one example of fixing AI output
+- [ ] Open the deck in PowerPoint and check every slide for overlap/overflow
+
+## 2026-11-03: Final requirements
+
+**Asked:** how long the array takes to meet R2, then update the docs to the team's final requirements (R1 ±10° pointing, R2 180° to the sun in 10 s, R3 2 N·m disturbance, stretch: battery charge, wheel desaturation).
+**Found:** no command 10 → 2 run on the SD card yet. After the scan, runs 014–020 reached ±10° in 1.6–2.0 s from 93–125° error.
+**Changed:**
+- `README.md`: "Draft requirements" replaced by "Requirements (final)" with a status column from the data (R1 pass, R2 pass from the post-scan slews, R3 fail as written but met at 2.0–2.8 mN·m, both stretch goals not tested). Sim table and notes no longer cite the old R1/R2/S1.
+- `2. THEORY/plot_suntrack.py`, `final_figures.py`, `sim/sun_tracker_sim.py`: labels only. R1 is now pointing accuracy; settle time has no R number; `step180` is the R2 scenario. Firmware already matched the final set (command 10), so it is unchanged.
+**Not checked:** `plot_suntrack.py` not run (matplotlib not installed on this Mac); all three scripts compile.
+**Team must decide:**
+- [ ] R1 pass line in the deck says ±5°; the data is 95–98% within ±5°, 100% within ±10°
+- [ ] Run command 10 → `2` once for a true 180° slew time
+
+## 2026-11-03: Command 11 momentum dump, command 10 reworked
+
+**Asked:** a new command that shows momentum dumping: find the sun, face it, hold, let a fan pair saturate the wheel, then use the other pair as "thrusters" to desaturate it, to show how long pointing can be held. Also rework command 10 to match the final requirements.
+**Changed:**
+- `main.cpp`: new command 11 `momentum_dump_test()`. `sun_track()` takes an optional `desat` flag. With it, after the disturbance pair turns on (same 10 s on target as command 8), the other pair fires at 100% when |wheel command| ≥ 300 RPM and stops at ≤ 80 RPM; repeats until 'X' (max 20 min). `[DESAT]` lines per dump; the summary adds the dump count, the average dump length and the longest stretch inside ±10° (that longest stretch is now in the command 8 summary too). A dump over 3 min ends the test. New log column `dumping`, telemetry `dump:`.
+- Command 10: added `4` (S1: average MAX17048 charge rate over 60 s while on the sun > 0 → PASS) and `5` (S2: command 11; PASS after one finished dump with pointing never leaving ±10° since the fans turned on, + 10 s). R1's PASS line also gives the % within ±5°. R3 text mentions 2.4 mN·m vs 2 N·m. New `parse_fan_choice()` for "cw 60"-style words.
+- `definitions.h`: `DESAT_*` and `DEMO_S1_*` / `DEMO_S2_*`.
+- README (commands 10/11, S1/S2 verification), `3. CODE/FUNCTIONS.md`, CLAUDE.md. Sim unchanged: no controller math changed (fan switching only). Compiles, no warnings.
+**Why the disturbance defaults to 70%:** both pairs are the same fans, so 100% vs 100% cancels and the wheel never unloads. Fan model (thrust ~ duty²): 70% ≈ 0.9 mN·m, so ~2 min to reach 300 RPM and ~1 min to dump with the thrusters.
+**Verify on KestrelSAT:**
+- [ ] `1` lists 10 and 11. `11` then `ccw`: disturbance on after 10 s green, wheel climbs, `[DESAT] Dump 1` at 300 RPM with the GPIO 27 pair on, wheel falls to 80 RPM, pointing stays inside ±10°
+- [ ] The thrusters really slow the wheel (if the wheel keeps climbing, the pairs or duty are wrong; lower the disturbance duty)
+- [ ] 5 V rail with the wheel plus all four fans on (rail sag, brown-out)
+- [ ] 'X' during a dump stops the wheel and all four fans
+- [ ] `10` then `4`: charge-rate lines every 5 s, PASS/FAIL at 60 s (does the gauge's rate update that fast?)
+- [ ] `10` then `5`: PASS after the first dump; how long the whole run takes
+
+## 2026-11-03: Command 10 trimmed to R1/R2, R3, S2
+
+**Asked:** drop S1 (team is not going for it); combine R1 and R2 into one demo; after the scan, turn 180° away before tracking.
+**Changed:**
+- `main.cpp`: command 10 is now `1` = R2 + R1 in one run, `2` = R3, `3` = S2. For `1`, when the scan finds the sun the array is sent 180° away right away (no settling on the sun first), sits there 3 s, then the timed slew back (R2), then a 30 s hold within ±10° (R1). One final line gives both results and the % within ±5°. S1 battery demo removed.
+- `definitions.h`: removed `DEMO_R2_SETTLE_MS` and `DEMO_S1_*`.
+- README (command 10 row, requirement table: S1 row removed, verification refs renumbered), `3. CODE/FUNCTIONS.md`. Compiles, no warnings.
+**Verify on KestrelSAT:**
+- [ ] `10` then `1`: after the purple scan the array turns 180° away (−X dark), holds ~3 s, slews back with one direction (latch), R2 time printed, then R1 PASS after 30 s
+- [ ] No rescan while turned away or right after the slew back
+- [ ] `10` then `2` / `3`: fan options read as `2 cw`, `3 ccw 60`

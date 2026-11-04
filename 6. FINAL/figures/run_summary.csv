@@ -1,0 +1,5 @@
+day,run,settle_s,longest_in10_s,track_s,in10_pct,in5_pct,rms_deg
+30 Oct,SunTrack_data014.csv,14.5,96,100,100,98,2.4
+30 Oct,SunTrack_data015.csv,15.1,95,100,100,95,2.6
+2 Nov,SunTrack_data016.csv,15.7,54,100,95,88,12.1
+2 Nov,SunTrack_data017.csv,15.2,52,94,95,91,10.4

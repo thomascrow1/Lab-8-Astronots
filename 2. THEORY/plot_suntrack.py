@@ -10,8 +10,10 @@ Usage:
   python plot_suntrack.py data/*.csv               # one figure per file
 
 Outputs <file>.png next to each CSV and prints a requirement summary:
-  R1: time to get within ±10° of the sun (after control starts) and stay there
-  R2: longest continuous time within ±10°
+  R1 (pointing accuracy): % of tracking time within ±10°, longest continuous
+      time within ±10°, RMS error after settling
+  Settle time: time to get within ±10° after control starts and stay there
+  (R2, the 180° slew in 10 s, is judged live by command 10 -> 2)
 """
 
 import argparse
@@ -68,7 +70,7 @@ def summarize(d):
     track = d["mode"] == "TRACK"
     if not track.any():
         return {"settle_s": None, "within_pct": 0.0, "longest_s": 0.0, "rms_deg": None, "sat_pct": 0.0}
-    # control starts at the first ACQUIRE (scan) or TRACK sample, so R1 includes the scan time
+    # control starts at the first ACQUIRE (scan) or TRACK sample, so the settle time includes the scan time
     t_control = d["t"][np.isin(d["mode"], ["ACQUIRE", "TRACK"])][0]
     t, err = d["t"][track], np.abs(d["err"][track])
     outside = np.where(err > BAND_DEG)[0]
@@ -157,9 +159,9 @@ def main():
         settle = "never" if s["settle_s"] is None else f"{s['settle_s']:.1f} s"
         rms = "n/a" if s["rms_deg"] is None else f"{s['rms_deg']:.1f}°"
         print(f"{os.path.basename(path)}")
-        print(f"  R1 time to settle within ±{BAND_DEG:.0f}°: {settle}")
-        print(f"  R2 longest time within ±{BAND_DEG:.0f}°:    {s['longest_s']:.1f} s")
-        print(f"  time within ±{BAND_DEG:.0f}° while tracking: {s['within_pct']:.1f}%")
+        print(f"  time to settle within ±{BAND_DEG:.0f}°:    {settle}")
+        print(f"  R1 longest time within ±{BAND_DEG:.0f}°:    {s['longest_s']:.1f} s")
+        print(f"  R1 time within ±{BAND_DEG:.0f}° while tracking: {s['within_pct']:.1f}%")
         print(f"  RMS error after settling:          {rms}")
         print(f"  wheel saturated:                   {s['sat_pct']:.1f}% of tracking time")
         print(f"  final mode:                        {d['mode'][-1]}")

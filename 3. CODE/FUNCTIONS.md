@@ -30,6 +30,8 @@ above (+Z). The solar array is the −X face (180°). Sun sensor channels are al
 | 6 | `ad_check()` | Guided sun sensor + gyro check. |
 | 7 | `pt_sweep()` | Phototransistor resistor sweep. |
 | 8 | `fan_hold_test()` | Sun tracker + disturbance fans (requirement 3). |
+| 10 | `req_demo()` | Final presentation demo: shows R1/R2 (one run), R3 or S2 with a live PASS/FAIL. |
+| 11 | `momentum_dump_test()` | Sun tracker + disturbance fans + "thruster" fans that unload the wheel (stretch S2). |
 
 ---
 
@@ -119,7 +121,7 @@ If any channel changed by less than 300 counts, it refuses to apply the new cali
 range would wreck the sun direction) and keeps the old one. Otherwise it applies it and prints a
 `SunCalibration sun_cal = ...` line to paste into `main.cpp` so it survives a reboot. `X` cancels.
 
-### `sun_track(fan_u_pct, fan_l_pct)` (command 4, and command 8 through `fan_hold_test`)
+### `sun_track(fan_u_pct, fan_l_pct, demo_req, desat)` (command 4; 8, 10 and 11 call it too)
 The main test. Creates `SunTrack_dataNNN.csv`, waits for a key, then runs a 20 Hz loop
 (`interval_testPoint` = 50 ms) through these modes:
 
@@ -131,7 +133,7 @@ The main test. Creates `SunTrack_dataNNN.csv`, waits for a key, then runs a 20 H
 | TRACK | after the scan | Holds the sun heading with the gyro and the PD controller (`tracker_step`). Sequential lobing (`lobe_step`) aims a few degrees each side to keep correcting gyro drift. If −X stays dim while pointed at the sun, it scans again. | green within 10°, orange outside |
 
 Every pass it also: compensates for motor lag (`motor_lag_comp`), sends the wheel command
-(`set_wheel_rpm`), warns if the wheel stays saturated, writes one CSV row (24 columns), prints
+(`set_wheel_rpm`), warns if the wheel stays saturated, writes one CSV row (25 columns; the last, `dumping`, is 1 while command 11 thrusters fire), prints
 telemetry (`Name:value` pairs, every point on USB, every 10th on XBee; the GCS Sun Map reads these),
 and flushes the SD file every 10 points.
 
@@ -178,6 +180,32 @@ of each channel's dark-to-bright span. Send `done` to finish; plot with `2. THEO
 Asks for the fan direction (`cw` = GPIO 27 pair, `ccw` = GPIO 4 pair, seen from above) and an
 optional duty (default 100%), e.g. `ccw` or `cw 60`. Then runs `sun_track()` with that pair, so the
 fans switch on once KestrelSAT has held the sun for 10 s.
+
+### `req_demo()` (command 10)
+Asks for `1`, `2` or `3` and runs `sun_track(..., demo_req)`. With `demo_req` set, `sun_track()` works
+as usual, but once tracking starts it judges that requirement every sample and ends the test with a
+PASS or FAIL line (progress every 5 s):
+- **1 (R2 then R1)**: when the scan finds the sun, `sun_track()` sets `demo_offset = 180`, so the controller
+  turns the array away before it ever tracks (lobing is paused, since −X sees nothing). After 3 s there it
+  sets `demo_offset = 0` and starts a timer. R2 PASS if it enters ±10° within 10 s and stays in for 5 s; an
+  overshoot out of the band restarts the reach time. Then it keeps holding: R1 PASS after 30 s in a row inside
+  ±10° (timed from the R2 arrival; leaving the band restarts it). The last line gives both results and the %
+  of the hold within ±5°.
+- **2 (R3)**: same fan start as command 8. PASS after 30 s of fans on without leaving ±10°; FAIL the moment it leaves.
+- **3 (S2)**: runs the command 11 momentum dump (`desat = true`). PASS once one dump has finished, pointing has
+  never left ±10° since the fans turned on, and 10 s more have passed. FAIL the moment pointing leaves the band.
+Settings: `DEMO_*` and `DESAT_*` in `definitions.h`. 1 and 2 give up (FAIL) after 3 min, 3 after 20 min.
+`parse_fan_choice()` reads the optional fan words (`cw`, `ccw 60`) for 2, 3 and command 11.
+
+### `momentum_dump_test()` (command 11)
+Asks for the *disturbance* pair and duty (default 70%) and runs `sun_track(..., 0, true)`. The other pair
+is the "thruster". After 10 s on target the disturbance fans turn on and the wheel spins up to fight them.
+When the wheel command reaches `DESAT_START_RPM` (300), the thrusters fire at 100% against the
+disturbance, so the controller has to slow the wheel to keep pointing. That is the momentum dump. Below
+`DESAT_STOP_RPM` (80) the thrusters stop and the cycle repeats. `[DESAT]` lines mark each dump; the end
+summary gives the number of dumps, their average length and the longest time inside ±10°. A dump longer
+than `DESAT_MAX_MS` ends the test (the thrusters aren't unloading the wheel). The disturbance must be
+below 100%, because two equal fans at 100% cancel.
 
 ---
 

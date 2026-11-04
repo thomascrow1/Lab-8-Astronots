@@ -15,11 +15,11 @@
 - XBee: HardwareSerial(2), 9600 baud. ICM-20948 IMU and MAX17048 gauge on I2C.
 - Sun sensor: A0 = +X, A1 = +Y, A2 = −X, A3 = −Y (3.3 V, 3.3 kΩ).
 - TB9051FTG motor driver PWM1 = 33, PWM2 = 15. Encoder A = 14, B = 32. Motor supply 5 V.
-- Disturbance fans (4× LD3007MS on the 5 V rail, switched by XY-MOS modules, GPIO straight to TRIG): wired in diagonal pairs. GPIO 27 (`cw` in command 8) = clockwise from above, GPIO 4 (`ccw`) = counter-clockwise (LEDC channels 0 and 2). They share the 5 V rail with the wheel motor, so watch for rail sag.
+- Disturbance fans (4× LD3007MS on the 5 V rail, switched by XY-MOS modules, GPIO straight to TRIG): wired in diagonal pairs. GPIO 27 (`cw` in command 8) = clockwise from above, GPIO 4 (`ccw`) = counter-clockwise (LEDC channels 0 and 2). In command 11 one pair is the disturbance and the other acts as "thrusters". They share the 5 V rail with the wheel motor, so watch for rail sag.
 - Pin map: `include/definitions.h`.
 
 ## Conventions
-- Commands are dispatched in `process_main_menu()`, numbered 0–8 in order (renumbered 2 Nov 2026; old numbers are listed in README.md). Add new commands at the end.
+- Commands are dispatched in `process_main_menu()`, numbered 0–8 in order (renumbered 2 Nov 2026; old numbers are listed in README.md), then 10 (requirement demo; 9 is unused) and 11 (momentum dump). Add new commands at the end.
 - Telemetry format is `Name:value,Name:value`. Mirror every XBee message to Serial (`print_both()`).
 - Sun direction: 0° = +X, counter-clockwise (+Z) positive. Error = wrap180(sun_dir − array_axis).
 - Wheel speed is positive when spinning about +Z. Convert to PWM with `wheel_pwm_sign`.

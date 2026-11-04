@@ -131,3 +131,32 @@
 #define FAN_HOLD_TIME_MS        10000   // fans turn on after this long inside the band
 #define FAN_HOLD_DURATION_MS    1200000 // command 8 runs up to 20 min (the weak fans may take minutes to saturate)
 
+// Command 10 requirement demo (final presentation): command 4, judged live against one requirement,
+// prints PASS/FAIL and ends. Uses the same +/-FAN_HOLD_BAND_DEG band (gyro heading vs sun heading).
+#define DEMO_DURATION_MS        180000  // give up (FAIL) after this
+#define DEMO_PRINT_MS           5000    // progress line this often
+#define DEMO_R1_HOLD_MS         30000   // R1: after the R2 slew, PASS after this long inside the band in a row
+#define DEMO_R2_AWAY_MS         3000    // R1/R2: after the scan, held 180 deg from the sun this long before the timed slew back
+#define DEMO_R2_LIMIT_MS        10000   // R2: must reach the band within this
+#define DEMO_R2_CONFIRM_MS      5000    // R2: ...and then stay inside it this long
+#define DEMO_R2_TIMEOUT_MS      30000   // R2: FAIL if not settled this long after the slew starts
+#define DEMO_R3_FAN_MS          30000   // R3: PASS after the fans have been on this long without leaving the band
+#define DEMO_R3_DEFAULT_DUTY    100.0   // R3 fan duty (%) if none is given
+#define DEMO_S2_CONFIRM_MS      10000   // S2: after the first momentum dump ends, stay in the band this long -> PASS
+
+
+
+/*---------------------------------------------------------------------------------------------*/
+// Command 11 Momentum Dump (and command 10 -> 3): pretend thrusters unload the reaction wheel
+/*---------------------------------------------------------------------------------------------*/
+// Command 4 with one fan pair as a constant disturbance; the wheel spins up to fight it. When the wheel
+// gets near saturation, the OTHER pair fires as a "thruster" against the disturbance, so the controller
+// spins the wheel back down while it keeps pointing. Thrusters stop once the wheel is slow again; repeat.
+// Both pairs are the same fans: a 100% disturbance and a 100% thruster cancel, and the wheel never unloads.
+// So the disturbance runs below 100% (fan thrust ~ duty^2: 70% gives ~40% of full thrust, ~0.9 mN*m).
+#define DESAT_DIST_DEFAULT_PCT  70.0    // disturbance pair duty (%) if none is given
+#define DESAT_THRUSTER_PCT      100.0   // "thruster" pair duty (%) while dumping
+#define DESAT_START_RPM         300.0   // fire the thrusters when |wheel command| reaches this (75% of 400 RPM)
+#define DESAT_STOP_RPM          80.0    // stop them once |wheel command| is back below this (above the 50 RPM stall)
+#define DESAT_MAX_MS            180000  // a dump longer than this is not working (wrong pair, or too weak): end test
+

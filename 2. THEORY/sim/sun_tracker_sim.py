@@ -401,9 +401,9 @@ def settling_time(log, band_deg=10.0):
 
 
 SCENARIOS = {
-    "step90":   dict(sun_start_deg=90.0, description="R1: sun 90 deg from array"),
+    "step90":   dict(sun_start_deg=90.0, description="Sun 90 deg from array"),
     "step170":  dict(sun_start_deg=10.0, description="Sun nearly behind the array (170 deg)"),
-    "step180":  dict(sun_start_deg=0.0, description="Sun exactly behind the array (180 deg)"),
+    "step180":  dict(sun_start_deg=0.0, description="R2: sun exactly behind the array (180 deg)"),
     "step180hw": dict(sun_start_deg=0.0, half_power_deg=33.0, sun_noise=0.02, mx_spike_prob=0.06,
                       description="180 deg + narrow sensors + -X motor noise (like SunTrack_data008)"),
     "hwoffset": dict(sun_start_deg=150.0, string_k=0.0005, half_power_deg=33.0, adc_floor=0.08,
@@ -411,9 +411,9 @@ SCENARIOS = {
     "drift":    dict(sun_start_deg=150.0, half_power_deg=33.0, adc_floor=0.08, sun_noise=0.03,
                      gyro_drift_dps=0.25, duration_s=120.0,
                      description="Gyro bias off by 0.25 deg/s after release (SunTrack_data014)"),
-    "hold":     dict(sun_start_deg=175.0, duration_s=80.0, description="R2: hold on target 60 s"),
+    "hold":     dict(sun_start_deg=175.0, duration_s=80.0, description="R1: hold within 10 deg on target"),
     "moving":   dict(sun_start_deg=150.0, sun_rate_dps=5.0, description="Stretch: light moving 5 deg/s"),
-    "string":   dict(sun_start_deg=90.0, string_k=0.0005, description="R1 with string torsion"),
+    "string":   dict(sun_start_deg=90.0, string_k=0.0005, description="Sun 90 deg off with string torsion"),
     "sunlost":  dict(sun_start_deg=120.0, sun_off_at_s=30.0, description="Light turned off at 30 s"),
 }
 

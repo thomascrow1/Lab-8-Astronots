@@ -20,13 +20,13 @@ Paths are from the project root (this folder). Run the Python scripts from here.
 |---|---|
 | `1. CONTEXT/` | Lab 6/7 code and the lab slides. |
 | `2. THEORY/sim/sun_tracker_sim.py` | 1-axis body + wheel + sun sensor simulation. Uses the same controller as the firmware. |
-| `2. THEORY/plot_suntrack.py` | Plots a `SunTrack_dataNNN.csv` from the SD card and scores it against R1/R2. |
+| `2. THEORY/plot_suntrack.py` | Plots a `SunTrack_dataNNN.csv` from the SD card and scores it against R1 (pointing accuracy). |
 | `2. THEORY/plot_adcheck.py` | Plots an `ADCheck_dataNNN.csv` (command 6): measured vs expected sun direction. |
 | `2. THEORY/plot_ptsweep.py` | Plots `PTSweep_dataNNN.csv` (command 7): brightness, signal span and photocurrent vs resistor; recommends one. |
 | `2. THEORY/fan_thrust_model.py` | Ducted-fan model of the disturbance torque; with `--csv` (+ `--baseline`) measures it from a command 8 run. |
 | `2. THEORY/fan_hold_report.py` | Graphs and summary for a day of fan hold tests and fans-off baselines. |
 | `2. THEORY/plot_fansweep.py` | Plots the old fan torque sweep (`FanSweep_data001.csv`; the command was removed). |
-| `3. CODE/KestrelSAT_SunTracker/` | PlatformIO firmware (Lab 8 commands 0–8). Open **this folder** in VS Code / PlatformIO. |
+| `3. CODE/KestrelSAT_SunTracker/` | PlatformIO firmware (Lab 8 commands 0–8, 10 and 11). Open **this folder** in VS Code / PlatformIO. |
 | `3. CODE/FUNCTIONS.md` | Plain-language guide to every firmware function and command. |
 | `3. CODE/KestrelSAT_SunTracker/src/sun_tracker.cpp` | Hardware-free controller math (sun direction, error, PD step). |
 | `3. CODE/KestrelSAT_SunTracker/include/definitions.h` | Pins plus all sun tracker settings (gains, limits, timing, signs). |
@@ -37,14 +37,14 @@ Paths are from the project root (this folder). Run the Python scripts from here.
 | `CLAUDE.md` | Project rules for coding agents. |
 | `AI_LOG.md` | GenAI use log required by the Lab 8 guidance. Entries before 2 Nov 2026 use the old `2. CODE/analysis/` and `sim/` paths. |
 
-## Draft requirements
+## Requirements (final)
 
-| ID | Requirement | Verification |
-|---|---|---|
-| R1 | Starting from a sun error of ≤ 90°, KestrelSAT shall point the solar array normal within ±10° of the light source within 15 s of control start. | Test: command 4, `plot_suntrack.py` "R1 time to settle" |
-| R2 | KestrelSAT shall hold the solar array within ±10° of a fixed light source for ≥ 60 s. | Test: command 4, "R2 longest time within ±10°" |
-| R3 | KestrelSAT shall log pointing error, body rate, and wheel speed to SD at 20 Hz and send them over XBee at ≥ 2 Hz. | Demonstration: GCS plot + SD file |
-| S1 (stretch) | KestrelSAT shall keep the array within ±10° of a light moving at 5°/s. | Test: command 4 with a moving light |
+| ID | Requirement | Verification | Status |
+|---|---|---|---|
+| R1 | While in sunlight, KestrelSAT shall keep the solar array normal within ±10° of the Sun vector. | Test: mount KestrelSAT and monitor the angle between the array normal and the Sun vector (command 4, or command 10 → `1`, which also tests R2). Score with `plot_suntrack.py`. | **Pass.** 100% of the time within ±10° after settling, RMS 2.4–2.6°, ~95 s continuous (runs 014/015). Within ±5° 95–98% of the time. |
+| R2 | From an initial error of 180° from the Sun vector, the solar array normal shall reach the Sun vector within 10 s while keeping the R1 pointing accuracy. | Test: command 10 → `1` (after the scan, turns 180° away, then times the slew back; PASS if inside ±10° within 10 s and stays there 5 s). | **Pass.** Reached ±10° in 1.6–2.0 s from 93–125° error after the scan (runs 014–020). Full 180° run: command 10 → `1`. |
+| R3 | KestrelSAT shall keep the R1 pointing accuracy while subject to external torques up to 2 N·m. | Test: mount KestrelSAT, apply the disturbance with the fans (command 8, or command 10 → `2`), and monitor pointing. | **Fail as written.** 2 N·m is unrealistic to apply or counter at this scale with our tools. Met at 2.0–2.8 mN·m (fans): pointing held 52–55 s. |
+| S2 (stretch) | KestrelSAT should desaturate its reaction wheel while keeping the R1 pointing accuracy. | Test: command 11, or command 10 → `3` (one fan pair is the disturbance, the other pair acts as thrusters that unload the wheel); monitor pointing. | Not achieved: not tested. |
 
 ## Ground commands
 
@@ -59,6 +59,8 @@ Paths are from the project root (this folder). Run the Python scripts from here.
 | 6 | **Attitude determination check** (wheel off). Light off → 8 light spots every 45° → gyro still → turn KestrelSAT ~90° by hand. PASS/FAIL per step (±15°). Logs `ADCheck_dataNNN.csv`; plot with `python "2. THEORY/plot_adcheck.py"`. Run 3 first if the sun sensor wiring changed. |
 | 7 | **Phototransistor resistor sweep.** Send a resistor value (`4700`, `10k`), then light off + light on each face. Repeat per resistor, then `done`. Logs `PTSweep_dataNNN.csv`; plot with `python "2. THEORY/plot_ptsweep.py"`, which picks the resistor with the most signal and no saturation. Keep the light at the same distance every time. |
 | 8 | **Fan hold test.** Send `cw` (GPIO 27 pair) or `ccw` (GPIO 4 pair), optionally with a duty (`ccw 60`; default 100%). Runs exactly like 4; once pointing has stayed within ±10° for 10 s the fans turn on and the wheel fights them. Prints `[RESULT]` when pointing first leaves ±10° and when the wheel saturates, plus a summary (time to lose pointing, % of time inside the band). Ends 10 s after saturation, on `X`, or after 20 min. Logs `SunTrack_dataNNN.csv`. |
+| 10 | **Requirement demo** (final presentation). Then send `1`, `2` or `3`. Runs like 4 (hold, release on blue, scan), then judges the final requirements live and ends with PASS/FAIL. **1** (R2 + R1 in one run): as soon as the scan finds the sun, the array turns 180° **away** from it and sits there 3 s. Then the timed slew back: R2 PASS if inside ±10° within 10 s and it stays there 5 s. It keeps holding: R1 PASS after 30 s in a row inside ±10° (also prints the % of that time within ±5°). **2** (R3, disturbance): fans on after 10 s inside ±10°; PASS if it stays inside for 30 s with them on. `2` = CCW pair at 100%; `2 cw` or `2 ccw 60` to choose. **3** (S2, desaturation): runs command 11; PASS once one momentum dump has finished with pointing inside ±10° the whole time, plus 10 s. `3` = CCW disturbance at 70%; `3 cw` or `3 ccw 60` to choose. 1 and 2 give up after 3 min, 3 after 20 min. Logs `SunTrack_dataNNN.csv`. |
+| 11 | **Momentum dump.** Send the *disturbance* pair, `cw` or `ccw`, optionally with a duty (`ccw 60`; default 70%). The other pair acts as the thrusters. Runs like 4; after 10 s within ±10° the disturbance fans turn on and the wheel spins up to fight them. At 300 RPM the thrusters fire at 100% against the disturbance and the controller spins the wheel back down while it keeps pointing; below 80 RPM they stop. Repeats until `X` (max 20 min), then prints the number of dumps and the longest time inside ±10°. Keep the disturbance below 100%: two equal fans at 100% cancel and the wheel can't unload. The `dumping` log column is 1 while the thrusters fire. |
 
 Before 2 Nov 2026 the commands had other numbers (data files and `AI_LOG.md` entries from then use the old ones): 4 → 2, 10 → 3, 13 → 4, 14 → 5, 15 → 6, 16 → 7, 19 → 8. Old 2, 3, 5–9, 11, 12, 17, 18, 98 and 99 were removed.
 
@@ -90,10 +92,10 @@ Results with default gains (Kp = 0.0035, Kd = 0.0098, motor τ = 0.4 s):
 
 | Scenario | Settle (±10°) | Notes |
 |---|---|---|
-| step90 | ~4 s | meets R1 |
+| step90 | ~4 s | sun 90° from the array |
 | step170 | ~5 s | sun nearly behind the array |
-| hold | 0 s, 100% in band | meets R2 |
-| moving (5°/s) | never | PD lags a moving target by about (Kd/Kp)·rate ≈ 14°. S1 needs a change, for example damping on the error rate instead of the body rate, or an integral term. |
+| hold | 0 s, 100% in band | meets R1 (holds ±10°) |
+| moving (5°/s) | never | PD lags a moving target by about (Kd/Kp)·rate ≈ 14°. Following a moving light needs a change, for example damping on the error rate instead of the body rate, or an integral term. |
 | string torsion | never | String twist acts like a spring, which gives a steady offset of about 13° with k = 0.0005 N·m/rad. Measure the string's twist period on hardware: k = I·(2π/T)². |
 | sunlost | stops at 30.5 s | wheel stopped and reported, as designed |
 
@@ -102,7 +104,7 @@ Results with default gains (Kp = 0.0035, Kd = 0.0098, motor τ = 0.4 s):
 - **Sequential lobing (fine pointing while tracking, 30 Oct).** After the scan, the gyro alone drifted ~20–30° in 100 s (SunTrack_data014, bias measured by hand). Now, while tracking, KestrelSAT aims a few degrees to one side, then the other (now ±3°, 2 s each), compares −X brightness, and nudges the sun heading toward the brighter side (`LOBE_*` in `definitions.h`). It keeps seeking the brightest pointing without a rescan; rescan only below 30% of the peak. Sim: a 0.25°/s gyro error gives max 8° (was 24°). It can follow drift up to ~1°/s, so a 5°/s moving light still fails.
 - **Tighter pointing toward ±5° (30 Oct, after SunTrack_data015).** The lamp flickers at 120 Hz, so −X jumped ±300 counts between samples (wheel on or off). The sun sensors are now read 16 times spread over one 8.3 ms flicker period (`SUN_READS_PER_SAMPLE`, `SUN_READ_SPAN_US`). The 3° deadband stopped the satellite ~3.5° short of each lobe aim point, so it really swung only ~±1°; deadband is now 1°. Lobe is now ±3°, 2 s per side, gain 0.7. Sim (0.25°/s gyro error): time within ±5° 46% → 95%, max 8.3° → 6.1°.
 
-- **Scan-and-hold (command 4, 30 Oct).** With the sensors mid-face, only −X sees the light near the target, so the sun direction reads 181° anywhere in its cone (SunTrack_data011 rested ~20° off). Command 4 now turns one full circle (420°, ~9 s at 45°/s, LED purple), takes the heading where −X is brightest as the sun, and then holds that heading with the gyro. If −X drops below half its scan peak for 1 s while pointed there, it scans again. If a scan sees no sun, the test stops. Settings are `SCAN_*` and `REACQ_*` in `definitions.h`. Sim: settles in 11–12 s (R1 ≤ 15 s) and holds within ~2°; a moving light (S1) now fails because each move triggers a rescan.
+- **Scan-and-hold (command 4, 30 Oct).** With the sensors mid-face, only −X sees the light near the target, so the sun direction reads 181° anywhere in its cone (SunTrack_data011 rested ~20° off). Command 4 now turns one full circle (420°, ~9 s at 45°/s, LED purple), takes the heading where −X is brightest as the sun, and then holds that heading with the gyro. If −X drops below half its scan peak for 1 s while pointed there, it scans again. If a scan sees no sun, the test stops. Settings are `SCAN_*` and `REACQ_*` in `definitions.h`. Sim: settles in 11–12 s and holds within ~2°; a moving light now fails because each move triggers a rescan.
 
 - **Starting with the sun exactly behind the array (180°).** Turning left and turning right are equally short, so sensor noise picked the sign of the error each sample and the push reversed ~10 times/s (SunTrack_data008). A direction latch (`latch_far_error()`, `LATCH_*` in `definitions.h`) now commits to one direction once |error| > 150° and releases below 120°. The SD log has `err_ctrl(deg)` (error after the latch) and `latch` (0, +1, −1).
 - **−X sensor noise with the wheel running.** In SunTrack_data008, −X jumped to 500–4095 counts while +X was lit, only once the wheel ran. Check the −X wiring and ground, keep sensor wires away from the motor leads, or add 0.1 µF from A2 to GND.
