@@ -65,7 +65,33 @@ SUN_LOST_TIME_MS = 500
 TRACK_SPINUP_MS = 3000
 TRACK_RELEASE_MS = 8000
 TRACK_CONTROL_MS = 10000
+# Disturbance fans, command 10 requirement demo, command 11 momentum dump:
+FAN_KICK_MS = 500
+FAN_SAT_STOP_MS = 10000
+FAN_HOLD_BAND_DEG = 10.0
+FAN_HOLD_TIME_MS = 10000
+FAN_HOLD_DURATION_MS = 1200000
+DEMO_DURATION_MS = 180000
+DEMO_R1_HOLD_MS = 30000
+DEMO_R2_AWAY_MS = 3000
+DEMO_R2_LIMIT_MS = 10000
+DEMO_R2_CONFIRM_MS = 5000
+DEMO_R2_TIMEOUT_MS = 30000
+DEMO_R3_FAN_MS = 30000
+DEMO_LOST_STOP_MS = 10000
+DEMO_S2_CONFIRM_MS = 10000
+DESAT_DIST_DEFAULT_PCT = 70.0
+DESAT_THRUSTER_PCT = 100.0
+DESAT_START_RPM = 300.0
+DESAT_STOP_RPM = 80.0
+DESAT_MAX_MS = 180000
 DT_CONTROL = 0.050  # interval_testPoint (s)
+
+# Fan torque model (NOT in definitions.h): Z torque of one diagonal pair, + = counter-clockwise from above.
+# 100% value = mean of the 2 Nov hold tests (SunTrack_data019 CW 2.30, 020 CCW 2.51 mN*m, fan_hold_report.py).
+# Shape vs duty from fan_thrust_model.py: thrust ~ fan speed^2, fan stalls below 20% duty (a guess).
+FAN_TAU_100_NM = 2.41e-3
+FAN_STALL_DUTY = 0.20
 
 RPM_PER_RAD_S = 60.0 / (2.0 * math.pi)
 SENSOR_AXES_DEG = [0.0, 90.0, 180.0, 270.0]  # +X, +Y, -X, -Y
@@ -209,6 +235,12 @@ def scan_result(scan, peak_fraction=SCAN_PEAK_FRACTION, min_bright=SUN_LOST_THRE
     return True, sum(bi * hi for bi, hi in zip(b[i0:i1 + 1], h[i0:i1 + 1])) / w, peak
 
 
+def fan_pair_torque(duty_pct):
+    """Z torque magnitude (N*m) of one fan pair at a duty (0-100 %)."""
+    f = (duty_pct / 100.0 - FAN_STALL_DUTY) / (1.0 - FAN_STALL_DUTY)
+    return FAN_TAU_100_NM * min(max(f, 0.0), 1.0) ** 2
+
+
 def motor_lag_comp(w_cmd_rpm, w_prev_cmd_rpm, dt_s, motor_tau_s, max_rpm):
     w = w_cmd_rpm
     if dt_s > 0:
@@ -244,7 +276,8 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
              sun_start_deg=90.0, sun_rate_dps=0.0, duration_s=60.0,
              motor_tau_s=MOTOR_TAU_S, string_k=0.0, gyro_noise_dps=0.1, sun_noise=0.01,
              sun_off_at_s=None, half_power_deg=50.0, mx_spike_prob=0.0, use_latch=True,
-             adc_floor=0.0, gyro_bias_dps=0.0, use_scan=True, use_lobe=True, gyro_drift_dps=0.0, deadband_deg=POINTING_DEADBAND_DEG, seed=1):
+             adc_floor=0.0, gyro_bias_dps=0.0, use_scan=True, use_lobe=True, gyro_drift_dps=0.0, deadband_deg=POINTING_DEADBAND_DEG,
+             demo_req=0, fan_dir=0, fan_pct=0.0, desat=False, seed=1):
     """
     sun_start_deg : sun azimuth in the body frame at release (0 = +X; array is at 180)
     sun_rate_dps  : light source moving around KestrelSAT (deg/s, inertial)
@@ -259,6 +292,14 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     use_lobe      : sequential lobing while tracking (current firmware)
     gyro_drift_dps: extra gyro bias that appears after release (the held bias estimate misses it)
     deadband_deg  : PD deadband (POINTING_DEADBAND_DEG in firmware)
+    demo_req      : command 10 option (same logic as sun_track() in main.cpp, scan-and-hold only):
+                    1 = R1/R2 (turn 180 deg away after the scan, timed slew back, hold 30 s),
+                    2 = R3 (fans on after 10 s in the band, run until saturated / pointing lost),
+                    3 = S2 (command 11 + keep dumping until pointing is lost)
+    fan_dir       : disturbance pair: +1 = CCW (GPIO 4), -1 = CW (GPIO 27), 0 = no fans (command 8/10/11)
+    fan_pct       : disturbance pair duty (%)
+    desat         : command 11 momentum dump: the other pair fires as a thruster (opposite torque)
+    Returns the log as numpy arrays plus log["events"] (dict of times in s and the end reason).
     """
     rng = np.random.default_rng(seed)
     dt = 0.001
@@ -279,8 +320,20 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
     control_started, acquiring = False, False
     sun_heading, sun_peak, scan, scan_t0, dim_since = 0.0, 0.0, None, 0.0, None
     lobe, aim_offset = lobe_reset(), 0.0
+    # command 8 / 10 / 11 state (same names as sun_track() in main.cpp)
+    fans_wanted = fan_dir != 0 and fan_pct > 0
+    err_point, err_target = 999.0, 999.0
+    demo_offset, demo_step = 0.0, 0
+    demo_in_since, demo_slew_t, demo_reached, demo_reach_ms = None, None, False, None
+    in_band_since, saturated_since, demo_out_since = None, None, None
+    fans_on, fan_on_t, fan_kick_until, fan_band_lost_t, fan_sat_t = False, None, None, None, None
+    dist_now, thr_now = 0.0, 0.0      # duty (%) the disturbance / thruster pair runs at right now
+    dumping, dump_start, dump_count = False, None, 0
+    dump_times = []                   # (start, end) of each dump, s
+    end_reason = "duration"
 
-    log = {k: [] for k in ["t", "mode", "sun_dir", "err", "rate", "w_cmd", "w_meas", "tau", "sat", "true_err"]}
+    log = {k: [] for k in ["t", "mode", "sun_dir", "err", "rate", "w_cmd", "w_meas", "tau", "sat", "true_err",
+                           "phase", "array_angle", "true_array_angle", "fan_dist", "fan_thr", "dumping"]}
     t = 0.0
     step = 0
     while t < duration_s:
@@ -327,18 +380,26 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
                     found, sun_heading, sun_peak = scan_result(scan)
                     if not found:
                         mode, w_cmd = "STOPPED", 0.0
+                        end_reason = "no sun in scan"
                     else:
                         acquiring, dim_since = False, None
                         latch = {"dir": 0, "below_s": 0.0}
                         lobe, aim_offset = lobe_reset(), 0.0
+                        if demo_req == 1 and demo_step == 0:  # R1/R2: turn 180 deg AWAY first
+                            demo_offset, demo_step = 180.0, 1
+                err_point = err_target = 999.0
             else:
                 mode = "TRACK"
                 err_gyro = wrap180(sun_heading - heading)
-                if use_lobe:
+                err_point = err_gyro
+                err_target = wrap180(sun_heading + demo_offset - heading)
+                if use_lobe and demo_offset == 0.0:
                     err_aim = wrap180(sun_heading + aim_offset - heading)
                     settled = abs(err_aim) < LOBE_SETTLED_DEG and abs(rate_meas) < LOBE_SETTLED_DPS
                     aim_offset, sun_heading = lobe_step(lobe, norm[2], settled, DT_CONTROL, sun_heading)
-                err_aim = wrap180(sun_heading + aim_offset - heading)
+                elif demo_offset != 0.0:
+                    lobe, aim_offset = lobe_reset(), 0.0
+                err_aim = wrap180(sun_heading + demo_offset + aim_offset - heading)
                 err_ctrl = latch_far_error(err_aim, DT_CONTROL, latch) if use_latch else err_aim
                 tau, w_cmd, saturated = tracker_step(err_ctrl, rate_meas, DT_CONTROL, kp, kd,
                                                      deadband_deg, w_cmd)
@@ -362,10 +423,79 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
             tau, w_cmd, saturated = tracker_step(err_ctrl, rate_meas, DT_CONTROL, kp, kd,
                                                  deadband_deg, w_cmd)
 
+        # ---- command 8 / 10 / 11 logic (same order as sun_track() in main.cpp)
+        stop = mode == "STOPPED"
+        if saturated:
+            saturated_since = t_ms if saturated_since is None else saturated_since
+        else:
+            saturated_since = None
+        in_band = abs(err_point) <= FAN_HOLD_BAND_DEG
+        if in_band:
+            in_band_since = t_ms if in_band_since is None else in_band_since
+        else:
+            in_band_since = None
+        if fans_wanted and not fans_on and in_band_since is not None and t_ms - in_band_since >= FAN_HOLD_TIME_MS:
+            fans_on, fan_on_t, dist_now, fan_kick_until = True, t_ms, 100.0, t_ms + FAN_KICK_MS
+        if fan_kick_until is not None and t_ms >= fan_kick_until:
+            fan_kick_until, dist_now = None, fan_pct
+        if desat and fans_on and fan_kick_until is None:
+            if not dumping and abs(w_cmd) >= DESAT_START_RPM:
+                dumping, dump_start, thr_now = True, t_ms, DESAT_THRUSTER_PCT
+            elif dumping and abs(w_cmd) <= DESAT_STOP_RPM:
+                dumping, thr_now = False, 0.0
+                dump_count += 1
+                dump_times.append((dump_start / 1000.0, t))
+            elif dumping and t_ms - dump_start > DESAT_MAX_MS:
+                stop, end_reason = True, "dump too long"
+        if fans_on and not in_band and fan_band_lost_t is None:
+            fan_band_lost_t = t_ms
+        if fans_on and saturated and fan_sat_t is None:
+            fan_sat_t = t_ms
+        if fans_on and saturated_since is not None and t_ms - saturated_since > FAN_SAT_STOP_MS:
+            stop, end_reason = True, "wheel saturated"
+        if demo_req == 1 and control_started and not acquiring:
+            in_target = abs(err_target) <= FAN_HOLD_BAND_DEG
+            if in_target:
+                demo_in_since = t_ms if demo_in_since is None else demo_in_since
+            else:
+                demo_in_since = None
+            held_ms = t_ms - demo_in_since if in_target else 0.0
+            if demo_step == 1 and held_ms >= DEMO_R2_AWAY_MS:
+                demo_offset, demo_step, demo_slew_t, demo_in_since = 0.0, 2, t_ms, None
+            elif demo_step == 2:
+                if in_target and not demo_reached:
+                    demo_reached, demo_reach_ms = True, t_ms - demo_slew_t
+                elif not in_target and demo_reached:
+                    demo_reached = False
+                if held_ms >= DEMO_R2_CONFIRM_MS:
+                    demo_step = 3
+                elif t_ms - demo_slew_t > DEMO_R2_TIMEOUT_MS:
+                    stop, end_reason = True, "R2 timeout"
+            elif demo_step == 3 and held_ms >= DEMO_R1_HOLD_MS:
+                stop, end_reason = True, "R1 hold done"
+        if demo_req in (2, 3) and fans_on:
+            if abs(err_point) > FAN_HOLD_BAND_DEG:
+                demo_out_since = t_ms if demo_out_since is None else demo_out_since
+            else:
+                demo_out_since = None
+            if demo_out_since is not None and t_ms - demo_out_since >= DEMO_LOST_STOP_MS:
+                stop, end_reason = True, "pointing lost"
+
+        phase = mode
+        if control_started and not acquiring:
+            if demo_req == 1:
+                phase = "AWAY" if demo_step <= 1 else ("SLEW" if demo_step == 2 else "POINT")
+            elif dumping:
+                phase = "DUMP"
+            elif fans_on:
+                phase = "FANS"
+        array_angle = -err_point if err_point < 900 else float("nan")
+
         for key, val in zip(log.keys(), [t, mode, sun_dir, err, math.degrees(omega_b), w_cmd, w_wheel, tau,
-                                         saturated, true_err]):
+                                         saturated, true_err, phase, array_angle, -true_err, dist_now, thr_now,
+                                         dumping]):
             log[key].append(val)
-        if mode == "STOPPED":
+        if stop:
             break
 
         # ---- motor lag compensation (same as sun_track())
@@ -374,10 +504,12 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
 
         # ---- plant (1 ms steps until next control update)
         released = t_ms >= TRACK_RELEASE_MS
+        # disturbance pair pushes fan_dir, the thruster pair (other diagonal) pushes the opposite way
+        fan_torque = fan_dir * (fan_pair_torque(dist_now) - fan_pair_torque(thr_now))
         for _ in range(n_sub):
             w_dot = (w_motor - w_wheel) / motor_tau_s          # RPM/s
             w_wheel += w_dot * dt
-            torque_on_body = -I_WHEEL * (w_dot / RPM_PER_RAD_S) - string_k * math.radians(theta)
+            torque_on_body = -I_WHEEL * (w_dot / RPM_PER_RAD_S) - string_k * math.radians(theta) + fan_torque
             if released:
                 omega_b += torque_on_body / I_BODY_Z * dt
                 theta += math.degrees(omega_b) * dt
@@ -385,7 +517,12 @@ def simulate(kp=DEFAULT_KP, kd=DEFAULT_KD, bias_pwm=DEFAULT_BIAS_PWM,
         t += DT_CONTROL
         step += 1
 
-    return {k: np.array(v) for k, v in log.items()}
+    out = {k: np.array(v) for k, v in log.items()}
+    sec = lambda ms: None if ms is None else ms / 1000.0  # noqa: E731
+    out["events"] = {"end_reason": end_reason, "fan_on_s": sec(fan_on_t), "band_lost_s": sec(fan_band_lost_t),
+                     "saturated_s": sec(fan_sat_t), "slew_start_s": sec(demo_slew_t), "r2_reach_s": sec(demo_reach_ms),
+                     "dumps": dump_times}
+    return out
 
 
 def settling_time(log, band_deg=10.0):

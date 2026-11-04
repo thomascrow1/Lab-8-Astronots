@@ -465,3 +465,21 @@ Also: the `error(deg)` column reads ~0° the whole run (only −X lit), so the t
 - [ ] `10` then `1`: after the purple scan the array turns 180° away (−X dark), holds ~3 s, slews back with one direction (latch), R2 time printed, then R1 PASS after 30 s
 - [ ] No rescan while turned away or right after the slew back
 - [ ] `10` then `2` / `3`: fan options read as `2 cw`, `3 ccw 60`
+
+## 2026-11-03: Command 10 reworked for the six requirement graphs
+
+**Asked:** a clear way to see the requirements: rework command 10 so its CSVs make 6 graphs (time vs solar array angle with the Sun at 0°), 3 from hardware and 3 from the model. Graph 1 = R1 + R2, graph 2 = R3 with the fans at 50% and 100% (time to saturation), graph 3 = S2 (how long pointing holds while dumping).
+**Changed:**
+- `main.cpp` (`sun_track()`, `req_demo()`): command 10 files are named `R1R2_dataNNN.csv`, `R3_dataNNN.csv`, `S2_dataNNN.csv`. Every sun tracker log gets two new last columns: `phase` (AWAY/SLEW/POINT for 1, FANS/DUMP for 2/3, else the mode) and `array_angle(deg)` (= heading − sun heading, blank until the scan finds the sun). Telemetry adds `arr:`. R3 and S2 no longer end at PASS/FAIL: they print the verdict and keep going until pointing has been outside ±10° for 10 s (new `DEMO_LOST_STOP_MS`), the wheel has been saturated 10 s, 'X', or 20 min, then print a `[DEMO] ... SUMMARY` line. R1/R2 logic unchanged.
+- `definitions.h`: `DEMO_LOST_STOP_MS`. Comments updated.
+- `sun_tracker_sim.py`: `simulate()` takes `demo_req`, `fan_dir`, `fan_pct`, `desat` and runs the same command 10 / 11 logic (turn away, fan start + kick, thruster dumps, end rules). New fan torque model `fan_pair_torque()`: 2.41 mN·m per pair at 100% (2 Nov runs 019/020), × ((duty − 0.2)/0.8)². Controller math unchanged; the 10 old scenarios give bit-identical results.
+- New `2. THEORY/requirement_graphs.py`: the 6-graph figure, each graph alone, one CSV per graph, and `summary.md/.csv`. Output in `6. FINAL/requirements/` (graph 2 hardware = 2 Nov runs 019/020 until new runs exist).
+- README (new *Requirement graphs* section, command 10 row, folder table), `3. CODE/FUNCTIONS.md`.
+**Agent verified (no hardware):** PlatformIO build succeeds. Graph script scores 019/020 the same as `fan_hold_report.py` (pointing held 55.1/52.7 s, saturated 51.5/49.5 s). Model: R2 3.1 s; R3 saturates at 61 s (100%) and 427 s (50%); S2 holds ±4.3° through 3 dumps in 10 min.
+**Verify on KestrelSAT:**
+- [ ] `10` → `1`: file `R1R2_data001.csv`; `phase` goes AWAY → SLEW → POINT; `array_angle` starts near ±180 and ends near 0
+- [ ] `10` → `2 ccw 50`: R3 PASS/FAIL at 30 s, then keeps running; ends after saturation (may take ~7 min; check the 5 V rail and battery)
+- [ ] `10` → `2 ccw 100`: same, ~1 min to saturation
+- [ ] `10` → `3`: keeps dumping after the PASS line; ends when pointing is lost or on 'X'; 'X' stops the wheel and all four fans
+- [ ] Run `requirement_graphs.py` on the new CSVs and check the hardware panels line up with the model
+- [ ] Model 50% prediction depends on the guessed fan stall duty (20%); the 50% run measures it

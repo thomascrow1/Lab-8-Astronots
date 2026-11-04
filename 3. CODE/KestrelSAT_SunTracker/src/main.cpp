@@ -21,7 +21,7 @@
  * | 6   | Lab 8: Attitude determination check (sun sensor + gyro, PASS/FAIL) |
  * | 7   | Lab 8: Phototransistor resistor sweep (logs to SD) |
  * | 8   | Lab 8: Fan hold test (sun tracker + fans once on target; time to lose pointing / saturate) |
- * | 10  | Lab 8: Requirement demo (then 1-3: shows R1/R2, R3 or S2 with a live PASS/FAIL) |
+ * | 10  | Lab 8: Requirement demo (then 1-3: R1/R2, R3 or S2 with a live PASS/FAIL; logs R1R2/R3/S2_dataNNN.csv) |
  * | 11  | Lab 8: Momentum dump (sun tracker + disturbance fans + "thruster" fans that unload the wheel) |
  */
 
@@ -265,7 +265,7 @@ void process_main_menu() {
       print_both("6 - Lab 8: Attitude Determination Check");
       print_both("7 - Lab 8: Phototransistor Resistor Sweep");
       print_both("8 - Lab 8: Fan Hold Test (CW/CCW)");
-      print_both("10 - Lab 8: Requirement Demo (R1/R2, R3, S2)");
+      print_both("10 - Lab 8: Requirement Demo + graph data (R1/R2, R3, S2)");
       print_both("11 - Lab 8: Momentum Dump (fans = disturbance + thrusters)");
       break;
 
@@ -554,11 +554,17 @@ void sun_calibrate() {
 static SunScan sun_scan;  // ~5 KB, kept off the stack
 void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
   char file_name[40];
-  if (sd_createDataFile(&dataFile, "SunTrack")) {
+  // Command 10 runs get their own file names (R1R2_data001.csv, R3_..., S2_...) so they are easy to find.
+  const char *file_prefixes[4] = {"SunTrack", "R1R2", "R3", "S2"};
+  const char *file_prefix = (demo_req >= 1 && demo_req <= 3) ? file_prefixes[demo_req] : file_prefixes[0];
+  if (sd_createDataFile(&dataFile, file_prefix)) {
+    // Last two columns: phase of the run, and where the solar array points with the sun at 0 deg
+    // (= heading - sun heading, +Z positive; blank until the scan has found the sun).
     dataFile.println("mcu time(ms),mode,sun_plusX(count),sun_plusY(count),sun_minusX(count),sun_minusY(count),"
                      "sun_mag,sun_direction(deg),error(deg),body_rate(deg/s),mag_X(uT),mag_Y(uT),"
                      "torque_cmd(N*m),w_RW_cmd(RPM),w_RW_meas(RPM),saturated,err_ctrl(deg),latch,"
-                     "heading(deg),sun_heading(deg),aim_offset(deg),mx_bright,fan_gpio27(%),fan_gpio4(%),dumping");
+                     "heading(deg),sun_heading(deg),aim_offset(deg),mx_bright,fan_gpio27(%),fan_gpio4(%),dumping,"
+                     "phase,array_angle(deg)");
     dataFile.flush();
     dataFile.getName(file_name, sizeof(file_name));
     print_both(String("[INFO] Data file created successfully: ") + file_name);
@@ -602,14 +608,16 @@ void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
   bool release_announced = false;
   int test_point_count = 0;
   bool fans_wanted = fan_u_pct > 0 || fan_l_pct > 0;
-  // Command 10 -> 3 (S2) needs time for the wheel to spin up and dump, so it gets the long fan test length.
-  const uint32_t duration_ms = (demo_req && !desat) ? DEMO_DURATION_MS : (fans_wanted ? FAN_HOLD_DURATION_MS : track_duration_ms);
+  // Command 10 -> 2 and 3 (R3, S2) run until the wheel saturates or pointing is lost (weak fans can take
+  // minutes), so they get the long fan test length. Command 10 -> 1 gives up after DEMO_DURATION_MS.
+  const uint32_t duration_ms = (demo_req == 1) ? DEMO_DURATION_MS : (fans_wanted ? FAN_HOLD_DURATION_MS : track_duration_ms);
   const char *demo_names[4] = {"", "R1/R2", "R3", "S2"};
   const char *demo_name = (demo_req >= 1 && demo_req <= 3) ? demo_names[demo_req] : "";
   bool fans_on = false;
   uint32_t fan_kick_until = 0;     // millis() when the 100% start-up kick ends
   uint32_t fan_on_t = 0;           // test time (ms) the fans turned on
   bool fan_sat_reported = false;
+  uint32_t fan_sat_t = 0;          // test time (ms) the wheel first saturated with the fans on
   float err_point = 999.0;         // pointing error (deg) the requirement is judged on: gyro heading vs sun heading
   uint32_t in_band_since = 0;      // command 8: millis() pointing entered the band (0 = outside)
   uint32_t fan_band_lost_t = 0;    // test time (ms) pointing first left the band after the fans turned on
@@ -636,6 +644,10 @@ void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
   uint32_t demo_reach_ms = 0;      // R2: time from slew start to entering the band
   uint32_t demo_n = 0, demo_n5 = 0; // R1: samples in the hold, and how many of them were within +/-5 deg
   bool demo_r2_pass = false;       // R2: reached the sun within the limit
+  bool demo_judged = false;        // R3 / S2: PASS/FAIL already printed (the run keeps going for the graphs)
+  bool demo_pass = false;          // R3 / S2: that verdict
+  uint32_t demo_out_since = 0;     // R3 / S2: millis() pointing left the band with the fans on (0 = inside)
+  const char *phase = "";          // phase column in the SD log (see the header row)
   set_fans(0, 0);
   if (desat) {
     print_both(String("[INFO] Disturbance fans (") + (fan_u_pct > 0 ? "GPIO 27" : "GPIO 4") + ", " +
@@ -667,6 +679,16 @@ void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
                                 : String("never left the band")) +
                "; inside the band " + String(on_s > 0 ? 100.0 * fan_band_ms / (on_s * 1000.0) : 0.0, 0) +
                "% of the time. Wheel " + (fan_sat_reported ? "saturated (see above)." : "did not saturate."));
+    // Command 10 -> 2 / 3: one line with the numbers the requirement graphs need.
+    if (demo_req == 2 || demo_req == 3) {
+      String verdict = demo_judged ? (demo_pass ? "PASS" : "FAIL") : (fan_band_lost_t ? "FAIL" : "not judged (ended early)");
+      print_both(String("[DEMO] ") + demo_name + " SUMMARY: " + verdict + ". Disturbance " +
+                 String(fan_u_pct > 0 ? fan_u_pct : fan_l_pct, 0) + "%. Pointing held " +
+                 String(((fan_band_lost_t ? fan_band_lost_t : t_end) - fan_on_t) / 1000.0, 1) + " s after the fans turned on" +
+                 (fan_band_lost_t ? "" : " (never lost)") + "; wheel " +
+                 (fan_sat_t ? String("saturated after ") + String((fan_sat_t - fan_on_t) / 1000.0, 1) + " s" : String("never saturated")) +
+                 (demo_req == 3 ? String("; ") + dump_count + " momentum dumps finished" : String("")) + ".");
+    }
   };
 
   // Every way the test ends: wheel and fans off, file closed, message, command 8 summary.
@@ -875,6 +897,7 @@ void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
     // With the fans on, a saturated wheel means pointing can't be held any more: report it, then end the test.
     if (fans_on && saturated && !fan_sat_reported) {
       fan_sat_reported = true;
+      fan_sat_t = t;
       print_both(String("[RESULT] Wheel saturated ") + String((t - fan_on_t) / 1000.0, 1) +
                  " s after the fans turned on (wMeas " + String(w_meas, 0) + " RPM).");
     }
@@ -949,45 +972,77 @@ void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
           }
         }
       } else if (demo_req == 2) {
-        // R3: keep the pointing requirement with the disturbance fans on.
+        // R3: keep the pointing requirement with the disturbance fans on. PASS/FAIL is printed after DEMO_R3_FAN_MS
+        // (or as soon as pointing leaves the band), then the run KEEPS GOING until the wheel saturates and pointing
+        // is lost, so the log shows how long the wheel can hold out at this fan duty.
         if (!fans_on) {
           if (print_now) print_both(String("[DEMO] R3: fans turn on after ") + (FAN_HOLD_TIME_MS / 1000) +
                                     " s within +/-10 deg (within for " + String(held_ms / 1000.0, 0) + " s).");
-        } else if (fan_band_lost_t != 0) {
-          end_test(String("[DEMO] R3 FAIL: pointing left +/-10 deg ") + String((fan_band_lost_t - fan_on_t) / 1000.0, 1) +
-                   " s after the fans turned on. Wheel and fans stopped.", t);
-          return;
         } else {
-          if (print_now) print_both(String("[DEMO] R3: fans on for ") + String((t - fan_on_t) / 1000.0, 0) + " of " +
-                                    (DEMO_R3_FAN_MS / 1000) + " s, error " + String(err_target, 1) + " deg, wMeas " +
-                                    String(w_meas, 0) + " RPM.");
-          if (t - fan_on_t >= DEMO_R3_FAN_MS) {
-            end_test(String("[DEMO] R3 PASS: held within +/-10 deg for ") + (DEMO_R3_FAN_MS / 1000) +
-                     " s with the fans pushing (max error " + String(demo_max_err, 1) + " deg). Wheel and fans stopped.", t);
-            return;
+          if (!demo_judged && fan_band_lost_t != 0) {
+            demo_judged = true;
+            demo_pass = false;
+            print_both(String("[DEMO] R3 FAIL: pointing left +/-10 deg ") + String((fan_band_lost_t - fan_on_t) / 1000.0, 1) +
+                       " s after the fans turned on. Running on until the wheel saturates ('X' stops).");
+          } else if (!demo_judged && t - fan_on_t >= DEMO_R3_FAN_MS) {
+            demo_judged = true;
+            demo_pass = true;
+            print_both(String("[DEMO] R3 PASS: held within +/-10 deg for ") + (DEMO_R3_FAN_MS / 1000) +
+                       " s with the fans pushing (max error " + String(demo_max_err, 1) +
+                       " deg). Running on until the wheel saturates ('X' stops).");
           }
+          if (print_now) print_both(String("[DEMO] R3: fans on for ") + String((t - fan_on_t) / 1000.0, 0) + " s, error " +
+                                    String(err_target, 1) + " deg, wheel " + String(w_cmd_rpm, 0) + " RPM (limit " +
+                                    String(WHEEL_MAX_RPM, 0) + ").");
         }
       } else if (demo_req == 3) {
-        // S2: unload the wheel with the thrusters while keeping the pointing requirement.
+        // S2: unload the wheel with the thrusters while keeping the pointing requirement. PASS/FAIL is printed after
+        // the first dump (or as soon as pointing leaves the band), then the run KEEPS GOING, dumping again and again,
+        // so the log shows how long pointing can be held while dumping.
         if (!fans_on) {
           if (print_now) print_both(String("[DEMO] S2: disturbance fans turn on after ") + (FAN_HOLD_TIME_MS / 1000) +
                                     " s within +/-10 deg (within for " + String(held_ms / 1000.0, 0) + " s).");
-        } else if (fan_band_lost_t != 0) {
-          end_test(String("[DEMO] S2 FAIL: pointing left +/-10 deg ") + String((fan_band_lost_t - fan_on_t) / 1000.0, 1) +
-                   " s after the disturbance fans turned on (" + dump_count + " dumps finished). Wheel and fans stopped.", t);
-          return;
-        } else if (dump_count >= 1 && now - last_dump_end >= DEMO_S2_CONFIRM_MS) {
-          end_test(String("[DEMO] S2 PASS: the thrusters unloaded the wheel in ") + String(dump_total_ms / 1000.0, 1) +
-                   " s and pointing stayed within +/-10 deg the whole time (" + String((t - fan_on_t) / 1000.0, 0) +
-                   " s with the fans on, max error " + String(demo_max_err, 1) + " deg). Wheel and fans stopped.", t);
-          return;
-        } else if (print_now) {
-          print_both(String("[DEMO] S2: fans on ") + String((t - fan_on_t) / 1000.0, 0) + " s, wheel " + String(w_cmd_rpm, 0) +
-                     " RPM" + (dumping ? " (THRUSTERS ON, dumping)" : String(" (dump at ") + String(DESAT_START_RPM, 0) + ")") +
-                     ", error " + String(err_target, 1) + " deg.");
+        } else {
+          if (!demo_judged && fan_band_lost_t != 0) {
+            demo_judged = true;
+            demo_pass = false;
+            print_both(String("[DEMO] S2 FAIL: pointing left +/-10 deg ") + String((fan_band_lost_t - fan_on_t) / 1000.0, 1) +
+                       " s after the disturbance fans turned on (" + dump_count + " dumps finished).");
+          } else if (!demo_judged && dump_count >= 1 && now - last_dump_end >= DEMO_S2_CONFIRM_MS) {
+            demo_judged = true;
+            demo_pass = true;
+            print_both(String("[DEMO] S2 PASS: the thrusters unloaded the wheel in ") + String(dump_total_ms / 1000.0, 1) +
+                       " s and pointing stayed within +/-10 deg the whole time (max error " + String(demo_max_err, 1) +
+                       " deg). Running on to see how long pointing holds ('X' stops).");
+          }
+          if (print_now) print_both(String("[DEMO] S2: fans on ") + String((t - fan_on_t) / 1000.0, 0) + " s, wheel " +
+                                    String(w_cmd_rpm, 0) + " RPM" +
+                                    (dumping ? " (THRUSTERS ON, dumping)" : String(" (dump at ") + String(DESAT_START_RPM, 0) + ")") +
+                                    ", error " + String(err_target, 1) + " deg, " + dump_count + " dumps done.");
         }
       }
     }
+
+    // Command 10 -> 2 / 3: once pointing has been outside the band for DEMO_LOST_STOP_MS with the fans on, the run is over.
+    if ((demo_req == 2 || demo_req == 3) && fans_on) {
+      if (fabs(err_point) > FAN_HOLD_BAND_DEG) { if (demo_out_since == 0) demo_out_since = now; }
+      else demo_out_since = 0;
+      if (demo_out_since != 0 && now - demo_out_since >= DEMO_LOST_STOP_MS) {
+        end_test(String("[DEMO] ") + demo_name + ": pointing outside +/-10 deg for " + (DEMO_LOST_STOP_MS / 1000) +
+                 " s. Run over. Wheel and fans stopped.", t);
+        return;
+      }
+    }
+
+    // Phase column: what part of the run this sample is (mode, or the command 8/10/11 step).
+    phase = mode;
+    if (control_started && !acquiring) {
+      if (demo_req == 1)  phase = (demo_step <= 1) ? "AWAY" : (demo_step == 2 ? "SLEW" : "POINT");
+      else if (dumping)   phase = "DUMP";
+      else if (fans_on)   phase = "FANS";
+    }
+    // Where the solar array points with the sun at 0 deg (blank until the scan has found the sun):
+    String array_angle = (err_point > 900) ? String("") : String(-err_point, 2);
 
     // Log to SD (same columns as the header row):
     dataFile.println(String(t) + "," + mode + "," + String(raw[SUN_PX]) + "," + String(raw[SUN_PY]) + "," +
@@ -997,7 +1052,8 @@ void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
                      String(w_cmd_rpm, 1) + "," + String(w_meas, 1) + "," + (saturated ? "1" : "0") + "," +
                      String(err_ctrl, 2) + "," + String(latch.dir) + "," + String(heading, 2) + "," +
                      String(sun_heading, 2) + "," + String(aim_offset, 1) + "," + String(mx_bright, 3) + "," +
-                     String(fan_upper_pct, 0) + "," + String(fan_lower_pct, 0) + "," + (dumping ? "1" : "0"));
+                     String(fan_upper_pct, 0) + "," + String(fan_lower_pct, 0) + "," + (dumping ? "1" : "0") + "," +
+                     phase + "," + array_angle);
 
     // Telemetry (Name:value for GCS plotter): every point on USB, 2 Hz on XBee
     String s = "t:" + String(t) + ",err:" + String(err, 1) + ",latch:" + String(latch.dir) + ",hdg:" + String(heading, 1) +
@@ -1010,6 +1066,7 @@ void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
                ",n+X:" + String(sun.norm[SUN_PX], 2) + ",n+Y:" + String(sun.norm[SUN_PY], 2) +
                ",n-X:" + String(sun.norm[SUN_MX], 2) + ",n-Y:" + String(sun.norm[SUN_MY], 2) +
                ",fan27:" + String(fan_upper_pct, 0) + ",fan4:" + String(fan_lower_pct, 0) + ",dump:" + String(dumping ? 1 : 0);
+    if (array_angle.length()) s += ",arr:" + array_angle;  // array angle from the sun, once the sun is found
     Serial.println(s);
     if (test_point_count % 10 == 0) {
       dataFile.flush(); // save file every 10 test points
@@ -1018,9 +1075,11 @@ void sun_track(float fan_u_pct, float fan_l_pct, int demo_req, bool desat) {
 
     // End test if complete:
     if (t > duration_ms) {
-      if (demo_req) end_test(String("[DEMO] ") + demo_name + " FAIL: ran out of time (" + (duration_ms / 1000) +
-                             " s) before the requirement was shown. Wheel and fans stopped.", t);
-      else          end_test("[INFO] Sun tracker test complete. Wheel and fans stopped.", t);
+      if (demo_req == 1) end_test(String("[DEMO] ") + demo_name + " FAIL: ran out of time (" + (duration_ms / 1000) +
+                                  " s) before the requirement was shown. Wheel stopped.", t);
+      else if (demo_req) end_test(String("[DEMO] ") + demo_name + ": time limit (" + (duration_ms / 60000) +
+                                  " min) reached. Wheel and fans stopped.", t);
+      else               end_test("[INFO] Sun tracker test complete. Wheel and fans stopped.", t);
       return;
     }
   }
@@ -1461,16 +1520,19 @@ bool parse_fan_choice(String words, float default_duty, String &dir, float &duty
  *       and stays there DEMO_R2_CONFIRM_MS. It keeps holding: R1 PASS once the array has stayed within
  *       +/-10 deg for DEMO_R1_HOLD_MS (also prints how much of that time was within +/-5 deg).
  *  - 2: R3 disturbance. Fans turn on after FAN_HOLD_TIME_MS on target; PASS if pointing stays within
- *       +/-10 deg for DEMO_R3_FAN_MS with them on. Send "2" (CCW pair, 100%) or e.g. "2 cw", "2 ccw 60".
+ *       +/-10 deg for DEMO_R3_FAN_MS with them on. The run then keeps going until the wheel saturates and
+ *       pointing is lost (time to saturation for the R3 graph). Send "2" (CCW pair, 100%) or e.g. "2 ccw 50".
  *  - 3: S2 desaturation (stretch). Command 11 (disturbance + thrusters); PASS once one momentum dump has
  *       finished and pointing has stayed within +/-10 deg the whole time since the fans turned on, plus
- *       DEMO_S2_CONFIRM_MS. Send "3" (CCW disturbance, 70%) or e.g. "3 cw", "3 ccw 60".
- *  Logs to SunTrack_dataNNN.csv like command 4. 'X' stops at any time.
+ *       DEMO_S2_CONFIRM_MS. The run then keeps dumping until pointing is lost, 'X', or 20 min (how long
+ *       pointing holds while dumping). Send "3" (CCW disturbance, 70%) or e.g. "3 cw", "3 ccw 60".
+ *  Logs to R1R2_dataNNN.csv, R3_dataNNN.csv or S2_dataNNN.csv (command 4 columns + phase + array_angle).
+ *  Graph them with 2. THEORY/requirement_graphs.py. 'X' stops at any time.
  */
 void req_demo() {
   print_both("[INFO] Requirement demo. Send 1 (R1/R2: turn 180 deg away, slew back in 10 s, hold within 10 deg), "
-             "2 (R3 hold against the fans; '2 cw' / '2 ccw 60', default ccw 100%), "
-             "or 3 (S2 desaturate with thrusters; '3 cw' / '3 ccw 60', default ccw 70%). 'X' cancels.");
+             "2 (R3 hold against the fans until the wheel saturates; '2 ccw 50' / '2 ccw 100', default ccw 100%), "
+             "or 3 (S2 desaturate with thrusters until pointing is lost; '3 cw' / '3 ccw 60', default ccw 70%). 'X' cancels.");
   String line = wait_for_line();
   line.toLowerCase();
   if (line == "x" || line.length() == 0) { print_both("[INFO] Demo canceled."); return; }
@@ -1490,7 +1552,7 @@ void req_demo() {
     print_both(String("[DEMO] R3: the array shall stay within +/-10 deg with the ") +
                (dir == "cw" ? "clockwise (GPIO 27)" : "counter-clockwise (GPIO 4)") + " fans at " + String(duty, 0) +
                "% (about 2.4 mN*m at 100%; the 2 N*m in the requirement is not possible at this scale). PASS after " +
-               (DEMO_R3_FAN_MS / 1000) + " s with the fans on.");
+               (DEMO_R3_FAN_MS / 1000) + " s with the fans on; then runs on until the wheel saturates.");
     if (dir == "cw") sun_track(duty, 0.0, 2);
     else             sun_track(0.0, duty, 2);
   } else if (req == 3) {
@@ -1499,7 +1561,8 @@ void req_demo() {
     if (!parse_fan_choice(rest, DESAT_DIST_DEFAULT_PCT, dir, duty)) { print_both("[INFO] Demo canceled."); return; }
     print_both(String("[DEMO] S2: the thrusters shall unload the reaction wheel while the array stays within +/-10 deg. ") +
                "Disturbance: " + (dir == "cw" ? "clockwise (GPIO 27)" : "counter-clockwise (GPIO 4)") + " at " + String(duty, 0) +
-               "%; the other pair is the thruster. PASS after one dump plus " + (DEMO_S2_CONFIRM_MS / 1000) + " s.");
+               "%; the other pair is the thruster. PASS after one dump plus " + (DEMO_S2_CONFIRM_MS / 1000) +
+               " s; then keeps dumping until pointing is lost, 'X', or " + (FAN_HOLD_DURATION_MS / 60000) + " min.");
     if (dir == "cw") sun_track(duty, 0.0, 3, true);
     else             sun_track(0.0, duty, 3, true);
   } else {

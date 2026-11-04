@@ -133,7 +133,7 @@
 
 // Command 10 requirement demo (final presentation): command 4, judged live against one requirement,
 // prints PASS/FAIL and ends. Uses the same +/-FAN_HOLD_BAND_DEG band (gyro heading vs sun heading).
-#define DEMO_DURATION_MS        180000  // give up (FAIL) after this
+#define DEMO_DURATION_MS        180000  // R1/R2: give up (FAIL) after this (R3 and S2 use FAN_HOLD_DURATION_MS, 20 min)
 #define DEMO_PRINT_MS           5000    // progress line this often
 #define DEMO_R1_HOLD_MS         30000   // R1: after the R2 slew, PASS after this long inside the band in a row
 #define DEMO_R2_AWAY_MS         3000    // R1/R2: after the scan, held 180 deg from the sun this long before the timed slew back
@@ -141,6 +141,8 @@
 #define DEMO_R2_CONFIRM_MS      5000    // R2: ...and then stay inside it this long
 #define DEMO_R2_TIMEOUT_MS      30000   // R2: FAIL if not settled this long after the slew starts
 #define DEMO_R3_FAN_MS          30000   // R3: PASS after the fans have been on this long without leaving the band
+                                        //   (then R3 and S2 keep running until pointing is lost, for the graphs)
+#define DEMO_LOST_STOP_MS       10000   // R3 / S2: end the run once pointing has been outside the band this long
 #define DEMO_R3_DEFAULT_DUTY    100.0   // R3 fan duty (%) if none is given
 #define DEMO_S2_CONFIRM_MS      10000   // S2: after the first momentum dump ends, stay in the band this long -> PASS
 

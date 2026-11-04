@@ -20,6 +20,7 @@ Paths are from the project root (this folder). Run the Python scripts from here.
 |---|---|
 | `1. CONTEXT/` | Lab 6/7 code and the lab slides. |
 | `2. THEORY/sim/sun_tracker_sim.py` | 1-axis body + wheel + sun sensor simulation. Uses the same controller as the firmware. |
+| `2. THEORY/requirement_graphs.py` | **The six requirement graphs** (R1+R2, R3, S2; hardware next to model) from command 10 CSVs, plus one CSV per graph and a summary table. Output: `6. FINAL/requirements/`. |
 | `2. THEORY/plot_suntrack.py` | Plots a `SunTrack_dataNNN.csv` from the SD card and scores it against R1 (pointing accuracy). |
 | `2. THEORY/plot_adcheck.py` | Plots an `ADCheck_dataNNN.csv` (command 6): measured vs expected sun direction. |
 | `2. THEORY/plot_ptsweep.py` | Plots `PTSweep_dataNNN.csv` (command 7): brightness, signal span and photocurrent vs resistor; recommends one. |
@@ -46,6 +47,33 @@ Paths are from the project root (this folder). Run the Python scripts from here.
 | R3 | KestrelSAT shall keep the R1 pointing accuracy while subject to external torques up to 2 N·m. | Test: mount KestrelSAT, apply the disturbance with the fans (command 8, or command 10 → `2`), and monitor pointing. | **Fail as written.** 2 N·m is unrealistic to apply or counter at this scale with our tools. Met at 2.0–2.8 mN·m (fans): pointing held 52–55 s. |
 | S2 (stretch) | KestrelSAT should desaturate its reaction wheel while keeping the R1 pointing accuracy. | Test: command 11, or command 10 → `3` (one fan pair is the disturbance, the other pair acts as thrusters that unload the wheel); monitor pointing. | Not achieved: not tested. |
 
+## Requirement graphs
+
+Six graphs, all with the same axes: time (s) across, solar array angle from the Sun (Sun = 0°, ±10° band = R1) up.
+Left column = KestrelSAT, right column = the model (`sun_tracker_sim.py`, same command 10 logic).
+
+| Graph | Requirement | Hardware runs (command 10) | t = 0 at |
+|---|---|---|---|
+| 1 | R1 + R2: turn 180° away, slew back within 10 s, hold ±10° for 30 s | `1` | slew back starts |
+| 2 | R3: hold against the fans at 50% and 100% until the wheel saturates | `2 ccw 50`, then `2 ccw 100` | fans on |
+| 3 | S2: hold while the thrusters dump the wheel, as long as it lasts | `3` | fans on |
+
+1. Run the four command 10 runs above. Copy the CSVs to `4. DATA/2. After PDR/<date>/csv/`.
+2. From the project root:
+   ```
+   python "2. THEORY/requirement_graphs.py" "4. DATA/2. After PDR/<date>/csv/"{R1R2,R3,S2}_data*.csv
+   ```
+3. Open `6. FINAL/requirements/`: `requirements_6graphs.png` (all six), `graphN_hardware.png` / `graphN_model.png`,
+   `graphN_*.csv` (the plotted data, ready for Excel), and `summary.md` (R2 time, R1 %, R3 time to saturation per
+   duty, S2 dumps and hold time, hardware vs model).
+
+With no CSVs it draws the model only. Older command 8/11 `SunTrack_*` files also work for graphs 2 and 3: the
+current `6. FINAL/requirements/` uses 2 Nov runs 019 (CW 100%) and 020 (CCW 100%) for graph 2 until the new runs exist.
+
+Model predictions (fan torque 2.41 mN·m per pair at 100%, ~speed² below): R2 reached in 3.1 s; R3 wheel
+saturates 61 s after the fans turn on at 100% (hardware: 49.5–51.5 s) and 427 s at 50%; S2 at 70% holds within
+±4.3° through 3 dumps in 10 min (each dump ~55 s, one every ~140 s).
+
 ## Ground commands
 
 | Cmd | Function |
@@ -59,7 +87,7 @@ Paths are from the project root (this folder). Run the Python scripts from here.
 | 6 | **Attitude determination check** (wheel off). Light off → 8 light spots every 45° → gyro still → turn KestrelSAT ~90° by hand. PASS/FAIL per step (±15°). Logs `ADCheck_dataNNN.csv`; plot with `python "2. THEORY/plot_adcheck.py"`. Run 3 first if the sun sensor wiring changed. |
 | 7 | **Phototransistor resistor sweep.** Send a resistor value (`4700`, `10k`), then light off + light on each face. Repeat per resistor, then `done`. Logs `PTSweep_dataNNN.csv`; plot with `python "2. THEORY/plot_ptsweep.py"`, which picks the resistor with the most signal and no saturation. Keep the light at the same distance every time. |
 | 8 | **Fan hold test.** Send `cw` (GPIO 27 pair) or `ccw` (GPIO 4 pair), optionally with a duty (`ccw 60`; default 100%). Runs exactly like 4; once pointing has stayed within ±10° for 10 s the fans turn on and the wheel fights them. Prints `[RESULT]` when pointing first leaves ±10° and when the wheel saturates, plus a summary (time to lose pointing, % of time inside the band). Ends 10 s after saturation, on `X`, or after 20 min. Logs `SunTrack_dataNNN.csv`. |
-| 10 | **Requirement demo** (final presentation). Then send `1`, `2` or `3`. Runs like 4 (hold, release on blue, scan), then judges the final requirements live and ends with PASS/FAIL. **1** (R2 + R1 in one run): as soon as the scan finds the sun, the array turns 180° **away** from it and sits there 3 s. Then the timed slew back: R2 PASS if inside ±10° within 10 s and it stays there 5 s. It keeps holding: R1 PASS after 30 s in a row inside ±10° (also prints the % of that time within ±5°). **2** (R3, disturbance): fans on after 10 s inside ±10°; PASS if it stays inside for 30 s with them on. `2` = CCW pair at 100%; `2 cw` or `2 ccw 60` to choose. **3** (S2, desaturation): runs command 11; PASS once one momentum dump has finished with pointing inside ±10° the whole time, plus 10 s. `3` = CCW disturbance at 70%; `3 cw` or `3 ccw 60` to choose. 1 and 2 give up after 3 min, 3 after 20 min. Logs `SunTrack_dataNNN.csv`. |
+| 10 | **Requirement demo + graph data** (final presentation). Then send `1`, `2` or `3`. Logs `R1R2_dataNNN.csv`, `R3_dataNNN.csv` or `S2_dataNNN.csv` (last columns: `phase`, `array_angle(deg)` = array angle with the Sun at 0°); graph with `requirement_graphs.py` (see *Requirement graphs*). Runs like 4 (hold, release on blue, scan), then judges the final requirements live and ends with PASS/FAIL. **1** (R2 + R1 in one run): as soon as the scan finds the sun, the array turns 180° **away** from it and sits there 3 s. Then the timed slew back: R2 PASS if inside ±10° within 10 s and it stays there 5 s. It keeps holding: R1 PASS after 30 s in a row inside ±10° (also prints the % of that time within ±5°). **2** (R3, disturbance): fans on after 10 s inside ±10°; PASS if it stays inside for 30 s with them on, then it keeps running until the wheel saturates and pointing is lost (10 s outside ±10° or 10 s saturated). `2` = CCW pair at 100%; `2 ccw 50` or `2 cw` to choose. **3** (S2, desaturation): runs command 11; PASS once one momentum dump has finished with pointing inside ±10° the whole time, plus 10 s, then it keeps dumping until pointing is lost. `3` = CCW disturbance at 70%; `3 cw` or `3 ccw 60` to choose. 1 gives up after 3 min, 2 and 3 stop after 20 min (or `X`). |
 | 11 | **Momentum dump.** Send the *disturbance* pair, `cw` or `ccw`, optionally with a duty (`ccw 60`; default 70%). The other pair acts as the thrusters. Runs like 4; after 10 s within ±10° the disturbance fans turn on and the wheel spins up to fight them. At 300 RPM the thrusters fire at 100% against the disturbance and the controller spins the wheel back down while it keeps pointing; below 80 RPM they stop. Repeats until `X` (max 20 min), then prints the number of dumps and the longest time inside ±10°. Keep the disturbance below 100%: two equal fans at 100% cancel and the wheel can't unload. The `dumping` log column is 1 while the thrusters fire. |
 
 Before 2 Nov 2026 the commands had other numbers (data files and `AI_LOG.md` entries from then use the old ones): 4 → 2, 10 → 3, 13 → 4, 14 → 5, 15 → 6, 16 → 7, 19 → 8. Old 2, 3, 5–9, 11, 12, 17, 18, 98 and 99 were removed.

@@ -183,18 +183,25 @@ fans switch on once KestrelSAT has held the sun for 10 s.
 
 ### `req_demo()` (command 10)
 Asks for `1`, `2` or `3` and runs `sun_track(..., demo_req)`. With `demo_req` set, `sun_track()` works
-as usual, but once tracking starts it judges that requirement every sample and ends the test with a
-PASS or FAIL line (progress every 5 s):
+as usual, but once tracking starts it judges that requirement every sample and prints a PASS or FAIL
+line (progress every 5 s). Each option logs to its own file, `R1R2_dataNNN.csv`, `R3_dataNNN.csv` or
+`S2_dataNNN.csv` (command 4 columns plus `phase` and `array_angle(deg)`, the array angle with the Sun at 0°).
+`2. THEORY/requirement_graphs.py` turns them into the six requirement graphs.
 - **1 (R2 then R1)**: when the scan finds the sun, `sun_track()` sets `demo_offset = 180`, so the controller
   turns the array away before it ever tracks (lobing is paused, since −X sees nothing). After 3 s there it
   sets `demo_offset = 0` and starts a timer. R2 PASS if it enters ±10° within 10 s and stays in for 5 s; an
   overshoot out of the band restarts the reach time. Then it keeps holding: R1 PASS after 30 s in a row inside
   ±10° (timed from the R2 arrival; leaving the band restarts it). The last line gives both results and the %
   of the hold within ±5°.
-- **2 (R3)**: same fan start as command 8. PASS after 30 s of fans on without leaving ±10°; FAIL the moment it leaves.
+- **2 (R3)**: same fan start as command 8. PASS after 30 s of fans on without leaving ±10°; FAIL if it leaves first.
+  Either way the run **keeps going** until the wheel has been saturated 10 s or pointing has been outside ±10°
+  for 10 s, so the log shows the time to saturation. Run it twice for graph 2: `2 ccw 50` and `2 ccw 100`.
 - **3 (S2)**: runs the command 11 momentum dump (`desat = true`). PASS once one dump has finished, pointing has
-  never left ±10° since the fans turned on, and 10 s more have passed. FAIL the moment pointing leaves the band.
-Settings: `DEMO_*` and `DESAT_*` in `definitions.h`. 1 and 2 give up (FAIL) after 3 min, 3 after 20 min.
+  never left ±10° since the fans turned on, and 10 s more have passed; FAIL if pointing leaves first. Either way
+  it **keeps dumping** until pointing has been outside ±10° for 10 s (or 'X', or 20 min): how long pointing holds.
+- 2 and 3 end with a `[DEMO] ... SUMMARY` line: verdict, pointing held, wheel saturated, dumps.
+- Log column `phase`: `AWAY` / `SLEW` / `POINT` for 1, `FANS` / `DUMP` for 2 and 3, otherwise the `mode`.
+Settings: `DEMO_*` and `DESAT_*` in `definitions.h`. 1 gives up (FAIL) after 3 min, 2 and 3 stop after 20 min.
 `parse_fan_choice()` reads the optional fan words (`cw`, `ccw 60`) for 2, 3 and command 11.
 
 ### `momentum_dump_test()` (command 11)
